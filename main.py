@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import bet_rules
+# 玩法表 + 选号逻辑跟控制台窗口共用一份，网页版不会算出第二个结果
+import manual_plays
 import msb_paths
 from msb_paths import APP_DIR, DATA_DIR, CONFIG_PATH
 
@@ -2126,7 +2128,7 @@ _TOKEN_REQUIRED_PREFIX = ("/restore/",)
 
 # 这些必须本机来源。默认值的开关仍然管不着它们 —— 改账的口子不能放开。
 _LOCAL_REQUIRED_PREFIX = ("/api/",)
-_LOCAL_REQUIRED = {"/", "/reset", "/backup", "/logs", "/top", "/status", "/recent"}
+_LOCAL_REQUIRED = {"/", "/manual", "/reset", "/backup", "/logs", "/top", "/status", "/recent"}
 
 
 def _load_or_create_api_token():
@@ -2677,6 +2679,162 @@ def api_parse():
         # can_llm=False：这类连模型也别试（12/13/14、鼠5尾 歧义、纯寒暄）
         "can_llm": not local.get("fatal"),
     })
+
+
+@app.route("/manual", methods=["GET"])
+def manual_page():
+    """网页版手工记账：跟控制台窗口同一套玩法、同一套规则。"""
+    return render_template("manual.html")
+
+
+def _manual_order():
+    """生肖的书写顺序（鼠牛虎兔…）—— 网页按钮排列和拼原文都按它。"""
+    mapping = current_zodiac_mapping()
+    return mapping, manual_plays.zodiac_order(mapping)
+
+
+@app.route("/api/manual/meta", methods=["GET"])
+def api_manual_meta():
+    """网页手工记账的初始化数据。
+
+    每个玩法对应哪几个号，全部由 bet_rules 现算 —— 网页只负责"选中了什么"，
+    不自己算号，跟控制台窗口、跟微信推送永远同一套。
+    """
+    mapping, order = _manual_order()
+    m = manual_plays.meta(mapping, order)
+    color_of = {}
+    for cname, ns in COLOR_MAP.items():
+        for n in ns:
+            color_of[n] = cname
+    nums = [{"num": "%02d" % i, "color": color_of.get("%02d" % i, "")}
+            for i in range(1, 50)]
+    chats = []
+    for r in list(_recent_records)[-80:][::-1]:
+        c = str(r.get("chat") or "").strip()
+        if c and c not in chats:
+            chats.append(c)
+    if not chats:
+        for r in iter_records()[-60:][::-1]:
+            c = str(r.get("chat") or "").strip()
+            if c and c not in chats:
+                chats.append(c)
+    # 默认账号：钱最多的那个（真有账的号排前面），没金额就按名字
+    accs = all_accounts()
+    default_acc = ""
+    try:
+        best = -1.0
+        for a in accs:
+            t = float(market_totals(a)["ALL"]["total"] or 0)
+            if t > best:
+                best, default_acc = t, a
+    except Exception:
+        default_acc = accs[0] if accs else ""
+    return jsonify({
+        "ok": True,
+        "groups": m["groups"],
+        "zodiacs": m["zodiacs"],
+        "numbers": nums,
+        "accounts": accs,
+        "default_account": default_acc,
+        "chats": chats,
+        "default_market": "MO",
+        "limit_confirm": 1000.0,
+        "zodiac_year": (_zodiac_cache["value"][1] if _zodiac_cache["value"] else ""),
+        "play_count": sum(len(g["items"]) for g in m["groups"]),
+    })
+
+
+@app.route("/api/manual/build", methods=["POST"])
+def api_manual_build():
+    """网页端「加入清单」：把勾的条件算成号、拼成原文，并自检一遍。
+
+    返回 text 就是最终要落账的原话（号码/生肖/组合名），网页拿它拼整句提交。
+    """
+    j = request.get_json(silent=True) or {}
+    mapping, order = _manual_order()
+    r = manual_plays.build(mapping,
+                           nums=[str(x) for x in (j.get("nums") or [])],
+                           zodiacs=[str(x) for x in (j.get("zodiacs") or [])],
+                           plays=[str(x) for x in (j.get("plays") or [])],
+                           amount=j.get("amount") or 0,
+                           order=order)
+    return jsonify(r)
+
+
+@app.route("/api/manual/submit", methods=["POST"])
+def api_manual_submit():
+    """网页版「记账」：清单拼成一句原文落账，跟控制台窗口同一个接口、同一条链路。
+
+    整句解析不通就逐注记 —— 宁可多几条流水，也不把账记错。
+    期号归档、港澳门分盘、撤销、指纹去重都由 record_bet 自己处理。
+    """
+    j = request.get_json(silent=True) or {}
+    notes = []
+    for n in (j.get("notes") or []):
+        t = str((n or {}).get("text") or "").strip()
+        try:
+            a = round(float((n or {}).get("each") or 0), 2)
+        except Exception:
+            a = 0.0
+        if not t or a <= 0:
+            continue
+        notes.append({"text": t, "each": a,
+                      "nums": [str(x) for x in ((n or {}).get("nums") or [])]})
+    if not notes:
+        return jsonify({"ok": False, "error": "清单是空的"})
+
+    acc = resolve_account(j.get("account") or "")
+    market = str(j.get("market") or "")
+    chat = str(j.get("chat") or "手工记账")
+    mapping, _order = _manual_order()
+
+    base = "manual-%d" % int(time.time() * 1000)
+    total = 0.0
+    numbers = 0
+    archived = ""
+    detail = []
+
+    def _one(text, mid):
+        nonlocal total, numbers, archived
+        r = record_bet(text, mid, chat_name=chat, sender="manual",
+                       sender_name=str(j.get("sender") or "本人"),
+                       account=acc, market=market)
+        if r.get("ok"):
+            total += float(r.get("total") or 0)
+            numbers += int(r.get("numbers") or 0)
+            if r.get("archived_issue"):
+                archived = str(r.get("archived_issue"))
+            if r.get("detail"):
+                detail.append(str(r.get("detail")))
+        return r
+
+    joined = manual_plays.join_text(notes)
+    if manual_plays.verify_join(mapping, notes, joined):
+        r = _one(joined, base)
+        if not r.get("ok"):
+            return jsonify({"ok": False,
+                            "error": r.get("error") or r.get("reason") or "记账失败"})
+    else:
+        fails = []
+        for i, n in enumerate(notes):
+            rr = _one("%s各%s" % (n["text"], manual_plays.amount_str(n["each"])),
+                      "%s-%d" % (base, i + 1))
+            if not rr.get("ok"):
+                fails.append("第%d注：%s"
+                             % (i + 1, rr.get("error") or rr.get("reason") or "失败"))
+        if fails:
+            return jsonify({"ok": False, "error": "；".join(fails),
+                            "partial": round(total, 2)})
+
+    out = {"ok": True, "market": market,
+           "market_name": "香港" if market == "HK" else "澳门",
+           "account": acc, "numbers": numbers, "total": round(total, 2),
+           "notes": len(notes), "text": joined}
+    if archived:
+        out["archived_issue"] = archived
+    if detail:
+        out["detail"] = "；".join(detail)
+    return jsonify(out)
 
 
 @app.route("/api/quick_bet", methods=["POST"])

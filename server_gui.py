@@ -34,6 +34,8 @@ import msb_paths as _paths
 # 手工记账要借规则解析器算「某个玩法是哪几个号」，用它保证界面选的号
 # 和文本规则算出来的号永远同一套（bet_rules 不碰 main，不会抢锁/建 app）
 import bet_rules
+# 玩法表 + 选号逻辑跟网页版共用同一份，两边不会算出两个结果
+import manual_plays
 
 # 版本号规则：主.次.修订。修 bug / 改文案 → 修订号；加功能 → 次版本；
 # 换底层方案（换存储、换协议、旧数据不兼容）→ 主版本。
@@ -2124,23 +2126,8 @@ class ManualBetDialog(tk.Toplevel):
     QUICK_AMTS = ["10", "20", "50", "100", "200", "500"]
 
     # (组名, [(按钮文字, 拼进原文的写法)])
-    PLAY_GROUPS = [
-        ("单双", [("单", "单"), ("双", "双")]),
-        ("大小", [("大", "大"), ("小", "小")]),
-        ("波色", [("红波", "红波"), ("蓝波", "蓝波"), ("绿波", "绿波")]),
-        ("波色单双", [("红单", "红单"), ("红双", "红双"),
-                     ("蓝单", "蓝单"), ("蓝双", "蓝双"),
-                     ("绿单", "绿单"), ("绿双", "绿双")]),
-        ("波色大小", [("红小", "红小"), ("红大", "红大"),
-                     ("蓝小", "蓝小"), ("蓝大", "蓝大"),
-                     ("绿小", "绿小"), ("绿大", "绿大")]),
-        ("合数", [("合数单", "合数单"), ("合数双", "合数双")]),
-        ("尾数", [(str(i) + "尾", str(i) + "尾") for i in range(10)]),
-        ("头数", [(str(i) + "头", str(i) + "头") for i in range(5)]),
-        ("五行", [("金", "金"), ("木", "木"), ("水", "水"),
-                 ("火", "火"), ("土", "土")]),
-        ("其它", [("家禽", "家禽"), ("野兽", "野兽")]),
-    ]
+    # 玩法按钮表跟网页版共用一份（manual_plays），避免两边按钮不一样
+    PLAY_GROUPS = manual_plays.GROUPS
 
     def __init__(self, master, mapping, grid, chats, account="", on_submit=None,
                  demo=False):
@@ -2546,35 +2533,15 @@ class ManualBetDialog(tk.Toplevel):
     # ---------- 集合 ----------
     def _nums_of_play(self, code):
         """玩法写法 → 号码集合。借规则解析器算，界面和账本永远同一套。"""
-        if code in self._pn:
-            return self._pn[code]
-        out = set()
-        for cand in (code + "各1", code + "1"):
-            r = bet_rules.parse_local(cand, self.mapping)
-            if r.get("ok") and r.get("bets"):
-                if all(abs(float(v) - 1.0) < 1e-9 for v in r["bets"].values()):
-                    out = set(r["bets"].keys())
-                    break
-        self._pn[code] = out
-        return out
+        return manual_plays.nums_of_play(code, self.mapping, self._pn)
+
+    def _order(self):
+        """拼原文时生肖的书写顺序（鼠牛虎兔…），不是盘面上的行序。"""
+        return manual_plays.zodiac_order(self.mapping)
 
     def _target(self):
-        if self.sel_nums:
-            return set(self.sel_nums)
-        zs = set()
-        for z in self.sel_z:
-            zs |= set(self.mapping.get(z, []))
-        if not self.sel_p:
-            return zs
-        ps = None
-        for k in self.sel_p:
-            s = self._nums_of_play(k)
-            ps = set(s) if ps is None else (ps & s)
-        if ps is None:
-            return zs
-        if zs:
-            ps = ps & zs
-        return ps
+        return manual_plays.target(self.mapping, self.sel_nums, self.sel_z,
+                                   self.sel_p, self._pn)
 
     # ---------- 文案 ----------
     def _read_amt(self):
@@ -2593,35 +2560,12 @@ class ManualBetDialog(tk.Toplevel):
 
     def _combo_name(self):
         """多玩法 → 一个能写进原文的组合名（大单 / 红单 / 红小）。"""
-        p = self.sel_p
-        if len(p) == 1:
-            return next(iter(p))
-        if p == {"大", "单"}:
-            return "大单"
-        if p == {"大", "双"}:
-            return "大双"
-        if p == {"小", "单"}:
-            return "小单"
-        if p == {"小", "双"}:
-            return "小双"
-        wave = {"红波": "红", "蓝波": "蓝", "绿波": "绿"}
-        w = [k for k in p if k in wave]
-        o = [k for k in p if k not in wave]
-        if len(w) == 1 and len(o) == 1 and o[0] in ("单", "双", "大", "小"):
-            return wave[w[0]] + o[0]
-        return ""
+        return manual_plays.combo_name(self.sel_p)
 
     def _compose_text(self, tgt):
         """清单里的这一注，拼成原文用的话。拼不出来就退回号码。"""
-        if self.sel_nums:
-            return " ".join(sorted(tgt))
-        if self.sel_z and not self.sel_p:
-            order = [rowd["zodiac"] for rowd in self.grid]
-            return "".join(z for z in order if z in self.sel_z)
-        if self.sel_p and not self.sel_z:
-            name = self._combo_name()
-            return name or " ".join(sorted(tgt))
-        return " ".join(sorted(tgt))
+        return manual_plays.compose_text(self.mapping, self.sel_nums, self.sel_z,
+                                         self.sel_p, self._order(), tgt)
 
     def _verify(self, text, nums, amt):
         """拼出来的话，规则解析器得认成同一组号、同一个单价。"""
@@ -2635,18 +2579,8 @@ class ManualBetDialog(tk.Toplevel):
         return all(abs(float(bets[n]) - amt) < 1e-6 for n in nums)
 
     def _label(self, tgt):
-        parts = []
-        if self.sel_nums:
-            parts.append("号码")
-        else:
-            if self.sel_z:
-                order = [rowd["zodiac"] for rowd in self.grid]
-                parts.append("+".join(z for z in order if z in self.sel_z))
-            if self.sel_p:
-                parts.append("∩".join(self._p_disp.get(k, k) for k in sorted(self.sel_p)))
-        nums = sorted(tgt)
-        preview = "/".join(nums) if len(nums) <= 8 else "%d 个号" % len(nums)
-        return "%s（%s）" % ("·".join(parts) or "号码", preview)
+        return manual_plays.label_of(self.sel_nums, self.sel_z, self.sel_p,
+                                     self._order(), tgt, self.mapping)
 
     def _hint_text(self, tgt):
         parts = []
@@ -2796,17 +2730,7 @@ class ManualBetDialog(tk.Toplevel):
     # ---------- 记账 ----------
     def _verify_join(self, joined):
         """整句拼一起后，解析结果得等于清单的合并结果。"""
-        expect = {}
-        for n in self.notes:
-            for num in n["nums"]:
-                expect[num] = round(expect.get(num, 0) + n["each"], 2)
-        r = bet_rules.parse_local(joined, self.mapping)
-        if not r.get("ok"):
-            return False
-        bets = r.get("bets") or {}
-        if set(bets.keys()) != set(expect.keys()):
-            return False
-        return all(abs(float(bets[k]) - expect[k]) < 1e-6 for k in expect)
+        return manual_plays.verify_join(self.mapping, self.notes, joined)
 
     def _submit(self):
         if self._busy or not self.notes:
@@ -2831,7 +2755,7 @@ class ManualBetDialog(tk.Toplevel):
 
         self._busy = True
         try:
-            joined = "；".join("%s各%s" % (t, self._amt_str(a)) for t, a in each)
+            joined = manual_plays.join_text(self.notes)
             if self._verify_join(joined):
                 res = self.on_submit({"text": joined, "chat": chat,
                                       "account": acc, "market": mk}) \
