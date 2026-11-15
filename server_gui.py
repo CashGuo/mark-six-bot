@@ -3039,8 +3039,8 @@ class ManualBetDialog(tk.Toplevel):
             if len(zs) < need:
                 return None, {}, 0.0
             zs = zs[:need]
-            # 组合注本来就是整注；但用户点「各」时是「每肖各这么多」，
-            # 两个肖各 10 就是 20 元，不能按 10 记。
+            # 组合注客户说「一般不会有各」，原文一律写整笔（鼠牛虎三中三300）。
+            # 界面上若点了「各」，就折算成整笔金额，别写「各」。
             total = round(amt * len(zs), 2) if self.zx_split == "each" else round(amt, 2)
             return zs, {}, total
         n = len(zs)
@@ -3092,10 +3092,13 @@ class ManualBetDialog(tk.Toplevel):
             txt += " → 填金额"
         elif per:
             txt += " → 每肖 %s，共 %s" % (self._amt_str(per[zs[0]]), self._amt_str(total))
-        elif self.zx_split == "each":
+        elif self.zx_split == "each" and self.zx_mode not in ZH_NEED:
             txt += " → 各 %s × %d 肖 = %s（6 个平特号同时有 %s）" % (
                 self._amt_str(self._read_amt()), len(zs), self._amt_str(total),
                 "、".join(zs))
+        elif self.zx_mode in ZH_NEED:
+            txt += " → 整注 %s（%s，%d 个肖）" % (
+                self._amt_str(total), self._zx_name(), len(zs))
         else:
             txt += " → 整注 %s（6 个平特号同时有 %s）" % (
                 self._amt_str(total), "、".join(zs))
@@ -3133,7 +3136,9 @@ class ManualBetDialog(tk.Toplevel):
             each_txt = ("每肖 %s" % self._amt_str(vals[0]) if len(set(vals)) == 1
                         else "分摊 " + "/".join(self._amt_str(per[z]) for z in zs))
         elif self.zx_split == "each" and self.zx_mode in ZH_NEED:
-            each_txt = "各%s ×%d" % (self._amt_str(self._read_amt()), len(zs))
+            # 组合注（二中二…六中六）客户明确「一般不会有各」，原文一律按整笔写，
+            # 这里也只是提示它是整笔，不要再显示成"各 ×N"（会跟原文对不上）
+            each_txt = "整注"
         else:
             each_txt = "整注"
         self.notes.append({

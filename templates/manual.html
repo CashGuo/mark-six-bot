@@ -348,7 +348,7 @@ function zxCalc() {
   if (need) {
     if (zs.length < need) return { zs: zs, per: null, need: need, total: 0 };
     const pick = zs.slice(0, need);
-    // 组合注默认整注；点「各」就是每肖各这么多，两肖各 10 = 20
+    // 组合注原文一律写整笔；点了「各」也只折算成整笔金额（客户端说一般不会有各）
     const total = ZX.split === "each"
       ? Math.round(amt * pick.length * 100) / 100 : amt;
     return { zs: pick, per: null, need: need, total: total, eachOne: amt };
@@ -408,16 +408,12 @@ function paintZx() {
     return;
   }
   h.className = "hint ok";
-  const zhongEach = !!ZH_NEED[ZX.mode] && ZX.split === "each";
+  // 组合注客户明确「一般不会有各」，原文一律按整笔写，提示也只说整注
   h.textContent = c.per
     ? (zxName() + " " + c.zs.join("+") + " → 每肖 " + money(c.per[c.zs[0]])
        + "，共 " + money(c.total) + " 元")
-    : (zhongEach
-        ? (zxName() + " " + c.zs.join("+") + " → 各 " + money(c.eachOne) + " ×"
-           + c.zs.length + " 肖 = " + money(c.total) + " 元（" + c.zs.length
-           + " 个肖同时命中）")
-        : (zxName() + " " + c.zs.join("+") + " → 整注 " + money(c.total)
-           + " 元（" + c.zs.length + " 个肖同时命中）"));
+    : (zxName() + " " + c.zs.join("+") + " → 整注 " + money(c.total)
+       + " 元（" + c.zs.length + " 个肖同时命中）");
   add.disabled = false;
 }
 
@@ -441,10 +437,9 @@ function zxAddNote() {
   if (!(Number($("amt").value || 0) > 0)) return toast("先在右边填金额", "bad");
   const vals = c.per ? c.zs.map(z => c.per[z]) : [];
   const same = vals.length && vals.every(v => Math.abs(v - vals[0]) < 1e-9);
-  const zhongEach = !!ZH_NEED[ZX.mode] && ZX.split === "each";
   const eachTxt = c.per
     ? (same ? "每肖 " + money(vals[0]) : "分摊 " + vals.map(v => money(v)).join("/"))
-    : (zhongEach ? "各 " + money(c.eachOne) + " ×" + c.zs.length : "整注");
+    : "整注";
   NOTES.push({
     zx: true, flat: true, text: zxText(c), label: zxName() + " " + c.zs.join("+"),
     nums: [], each: (c.per ? c.per[c.zs[0]] : c.total),
