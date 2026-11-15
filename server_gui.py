@@ -70,6 +70,13 @@ CLR_MUTED = "#6b7280"
 CLR_BLUE = "#1f6feb"
 CLR_RED = "#c0392b"
 CLR_BLUE2 = "#2b6cb0"
+# 组合注按玩法上色，一眼分清是二中二还是六中六
+ZHONG_CLR = {"二": "#1f6feb", "三": "#7c3aed", "四": "#c2410c",
+             "五": "#c0392b", "六": "#0f766e"}
+# 中二要 2 个肖，中三 3 个……中六 6 个
+ZH_NEED = {"zh2": 2, "zh3": 3, "zh4": 4, "zh5": 5, "zh6": 6}
+ZH_NAME = {"zh2": "二中二", "zh3": "三中三", "zh4": "四中四",
+           "zh5": "五中五", "zh6": "六中六"}
 CLR_GREEN = "#2b8a5f"
 CLR_GREY = "#aab2bd"
 
@@ -546,7 +553,7 @@ class MainWindow:
         # 权重再小也压不下来（实测给 6:7 也还是 55%）。
         # 左上：澳门、香港两个号码盘，左澳右港同时显示
         garea = tk.Frame(left, bg=CLR_BG)
-        garea.place(x=0, y=0, relwidth=1.0, relheight=0.375)
+        garea.place(x=0, y=0, relwidth=1.0, relheight=0.29)
         for mk, title in (("MO", " 澳门 号码盘 "), ("HK", " 香港 号码盘 ")):
             gp = tk.LabelFrame(garea, text=title, font=FONT_B, bg=CLR_BG,
                                fg="#111827", bd=1, relief="groove")
@@ -558,10 +565,10 @@ class MainWindow:
         # 中段：生肖金额（平特 + 连肖合并成一列）+ 组合注（二中二/三中三）。
         # 这两类钱不落 49 号盘，之前只能在「不计号」那个总数里看到一个合计。
         zbp = tk.LabelFrame(left,
-                            text=" 生肖金额（平特 + 连肖合并一列）· 组合注（二中二 / 三中三） ",
+                            text=" 生肖金额（平特 + 连肖合并一列）· 组合注（中二～中六 · 港澳合并） ",
                             font=("Microsoft YaHei UI", 12, "bold"), bg=CLR_BG,
                             fg="#111827", bd=1, relief="groove")
-        zbp.place(x=0, rely=0.375, relwidth=1.0, relheight=0.155)
+        zbp.place(x=0, rely=0.29, relwidth=1.0, relheight=0.24)
         zin = tk.Frame(zbp, bg=CLR_BG)
         zin.pack(fill="both", expand=True, padx=6, pady=(4, 2))
         self._zx_cells = {}
@@ -591,11 +598,9 @@ class MainWindow:
                                bg="#fafbfc", fg=CLR_RED)
                 amt.pack(side="left", padx=(0, 3))
                 self._zx_cells[mk].append(amt)
-        # 组合注按整注记，不进生肖表：一行文字列出来，多了一行截断
-        self.lb_combo = tk.Label(zbp, text="组合注：—",
-                                 font=("Microsoft YaHei UI", 11), bg=CLR_BG,
-                                 fg="#4b5563", anchor="w")
-        self.lb_combo.pack(fill="x", padx=8, pady=(2, 4))
+        # 组合注按整注记，不进生肖表：一行一种玩法，港澳合并，有注才出现
+        self.combo_box = tk.Frame(zbp, bg=CLR_BG)
+        self.combo_box.pack(fill="x", padx=8, pady=(2, 4))
 
         # 左下：最近记账，钉在底部，高度占 51%，宽度就到排序区起点
         bp = tk.LabelFrame(left, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
@@ -758,23 +763,49 @@ class MainWindow:
                 board_tot = float((b.get("totals") or {}).get("board") or 0)
                 t.configure(text="合计 %s" % fmt_money(board_tot))
 
-        # 组合注不摊进生肖表，按整注单列。条数多就只列前 5 条 + 省略号
-        parts, n, combo_sum = [], 0, 0.0
-        for mk, tag in (("MO", "澳"), ("HK", "港")):
-            for c in (boards.get(mk) or {}).get("combo") or []:
-                n += 1
-                combo_sum += float(c.get("amount") or 0)
-                if len(parts) < 5:
-                    parts.append("%s%s %s" % (tag, c.get("text") or "",
-                                              fmt_money(c.get("amount") or 0)))
-        if n:
-            txt = "组合注 %d 注 · 合计 %s 元 ｜ %s" % (
-                n, fmt_money(combo_sum), " ｜ ".join(parts))
-            if n > len(parts):
-                txt += " ｜ …"
-        else:
-            txt = "组合注：本期没有二中二 / 三中三"
-        self.lb_combo.configure(text=txt)
+        # 组合注：一行一种玩法（同类同生肖合并），港澳合并，有注才出现
+        self._render_combo(boards)
+
+    def _render_combo(self, boards):
+        """组合注：一行一种玩法，同类同生肖合并，澳门 + 香港合并成一份。"""
+        for w in self.combo_box.winfo_children():
+            w.destroy()
+        agg = {}
+        for mk in ("MO", "HK"):
+            for g in (boards.get(mk) or {}).get("combo_groups") or []:
+                lb = str(g.get("label") or "二中二")
+                zs = [z for z in (g.get("zodiacs") or []) if z]
+                key = (lb, "".join(zs))
+                a = agg.get(key)
+                if a is None:
+                    agg[key] = a = {"label": lb, "zodiacs": zs, "amount": 0.0}
+                a["amount"] = round(a["amount"] + float(g.get("amount") or 0), 2)
+        if not agg:
+            tk.Label(self.combo_box, text="组合注：本期没有", bg=CLR_BG,
+                     fg=CLR_MUTED, font=("Microsoft YaHei UI", 11)).pack(anchor="w")
+            return
+        rank = {"二": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+        rows = sorted(agg.values(), key=lambda g: (
+            rank.get(g["label"][0], 9), g["label"],
+            [msb_view.ZODIAC_ANIMALS.index(z)
+             if z in msb_view.ZODIAC_ANIMALS else 99 for z in g["zodiacs"]]))
+        total = 0.0
+        for g in rows:
+            line = tk.Frame(self.combo_box, bg=CLR_BG)
+            line.pack(fill="x", anchor="w")
+            tk.Label(line, text="%s ：" % g["label"], bg=CLR_BG,
+                     fg=ZHONG_CLR.get(g["label"][0], CLR_BLUE),
+                     font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
+            tk.Label(line, text="+".join(g["zodiacs"]) or "—", bg=CLR_BG,
+                     fg="#111827",
+                     font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
+            tk.Label(line, text="共 %s 元" % fmt_money(g["amount"]), bg=CLR_BG,
+                     fg=CLR_RED,
+                     font=("Consolas", 13, "bold")).pack(side="left", padx=(10, 0))
+            total = round(total + g["amount"], 2)
+        tk.Label(self.combo_box, text="合计：%s 元" % fmt_money(total), bg=CLR_BG,
+                 fg="#111827", font=("Microsoft YaHei UI", 12, "bold")).pack(
+                     anchor="w", pady=(2, 0))
 
     def _rescale_grid(self, market):
         """按格子实际高度重算号码盘字号。
@@ -2581,7 +2612,9 @@ class ManualBetDialog(tk.Toplevel):
         zxrow.pack(fill="x", padx=12)
         self._zx_mode_lb = {}
         for code, disp in (("pt", "平特"), ("lx", "连肖"),
-                           ("zh2", "二中二"), ("zh3", "三中三")):
+                           ("zh2", "二中二"), ("zh3", "三中三"),
+                           ("zh4", "四中四"), ("zh5", "五中五"),
+                           ("zh6", "六中六")):
             b = tk.Label(zxrow, text=disp, font=self._font("small"), bg="#eef0f3",
                          fg="#374151", padx=6, pady=3, cursor="hand2")
             b.pack(side="left", padx=(0, 4))
@@ -2806,8 +2839,9 @@ class ManualBetDialog(tk.Toplevel):
         return [rowd["zodiac"] for rowd in self.grid] if self.grid else []
 
     def _zx_name(self):
-        return {"pt": "平特", "lx": "%d连肖" % int(self.zx_len or 2),
-                "zh2": "二中二", "zh3": "三中三"}.get(self.zx_mode, "平特")
+        if self.zx_mode in ZH_NAME:
+            return ZH_NAME[self.zx_mode]
+        return "平特" if self.zx_mode == "pt" else "%d连肖" % int(self.zx_len or 2)
 
     def _zx_set(self):
         """这一注涉及哪几个肖。连肖只点一个肖时，按传统生肖序往后补。
@@ -2836,8 +2870,8 @@ class ManualBetDialog(tk.Toplevel):
         amt = self._read_amt()
         if not zs or amt is None:
             return None, {}, 0.0
-        if self.zx_mode in ("zh2", "zh3"):
-            need = 2 if self.zx_mode == "zh2" else 3
+        if self.zx_mode in ZH_NEED:
+            need = ZH_NEED[self.zx_mode]
             if len(zs) < need:
                 return None, {}, 0.0
             zs = zs[:need]
@@ -2878,9 +2912,8 @@ class ManualBetDialog(tk.Toplevel):
             return
         zs, per, total = self._zx_calc()
         if not zs:
-            if self.zx_mode in ("zh2", "zh3"):
-                need = 2 if self.zx_mode == "zh2" else 3
-                msg = "%s 要选 %d 个肖" % (self._zx_name(), need)
+            if self.zx_mode in ZH_NEED:
+                msg = "%s 要选 %d 个肖" % (self._zx_name(), ZH_NEED[self.zx_mode])
             elif self.zx_mode == "lx":
                 msg = "点一个生肖，按传统生肖序往后连 %d 个" % int(self.zx_len or 2)
             else:
@@ -2915,10 +2948,8 @@ class ManualBetDialog(tk.Toplevel):
         """
         all_sx = "".join(zs)
         total_txt = self._amt_str(total)
-        if self.zx_mode == "zh2":
-            return "%s二中二%s" % (all_sx, total_txt)
-        if self.zx_mode == "zh3":
-            return "%s三中三%s" % (all_sx, total_txt)
+        if self.zx_mode in ZH_NAME:
+            return "%s%s%s" % (all_sx, ZH_NAME[self.zx_mode], total_txt)
         if self.zx_mode == "lx":
             return "%s%d连肖%s" % (all_sx, max(2, len(zs)), total_txt)
         if self.zx_split == "each":
@@ -2937,7 +2968,7 @@ class ManualBetDialog(tk.Toplevel):
             vals = [round(per[z], 2) for z in zs]
             each_txt = ("每肖 %s" % self._amt_str(vals[0]) if len(set(vals)) == 1
                         else "分摊 " + "/".join(self._amt_str(per[z]) for z in zs))
-        elif self.zx_split == "each" and self.zx_mode in ("zh2", "zh3"):
+        elif self.zx_split == "each" and self.zx_mode in ZH_NEED:
             each_txt = "各%s ×%d" % (self._amt_str(self._read_amt()), len(zs))
         else:
             each_txt = "整注"

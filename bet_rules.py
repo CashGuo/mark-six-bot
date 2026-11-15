@@ -129,6 +129,9 @@ _UNSUPPORTED = re.compile(r"(中特|特肖)")
 # 生肖传统序：连肖补位按这个顺序往后数（鼠3连肖 = 鼠牛虎）
 SX_ORDER = "鼠牛虎兔龙蛇马羊猴鸡狗猪"
 
+# 组合注的说法：二中二 / 三中二 / 三中三 / 四中四 / 五中五 / 六中六
+_ZHONG_WORDS = r"(?:二中二|三中二|三中三|四中四|五中五|六中六)"
+
 # 港澳标记
 HK_MARKS = ("香", "港", "巷")
 MO_MARKS = ("奥", "澳", "门")
@@ -298,9 +301,10 @@ def _r_zhong2(m, zodiac):
 
 
 def _r_zhong(m, zodiac):
-    """14 二中二/三中二/三中三：号码只用来回显，钱按原文那个数算总额。"""
+    """14 二中二/三中二/三中三/四中四/五中五/六中六：号码只用来回显，钱按原文那个数算总额。"""
     out: List[str] = []
-    for tok in re.findall(r"\d+", m.group(2) or ""):
+    # pattern 里玩法名是非捕获组，后面的数字才是 group(1)
+    for tok in re.findall(r"\d+", m.group(1) or ""):
         v = int(tok)
         if 1 <= v <= 49:
             out.append(_two(v))
@@ -363,7 +367,7 @@ PLAYS: List[Play] = sorted([
     # 优先级高的先匹配：复合玩法必须先于它的组成部分被吃掉，
     # 否则 "红单" 会被 "红" 抢走、只算成红波 17 个号。
     # 14 二中二/三中二/三中三：只记总额，号码只用来回显
-    Play("zhong", "中二/中三", r"(二中二|三中二|三中三)((?:\s*\d+)*)", _r_zhong, 93,
+    Play("zhong", "中二/中三", _ZHONG_WORDS + r"((?:\s*\d+)*)", _r_zhong, 93,
          mode="flat"),
     Play("color_parity", "波色单双", r"(红|蓝|绿)(单|双)", _r_color_parity, 90),
     Play("color_size", "波色大小", r"(红|蓝|绿)(小|大)", _r_color_size, 88),
@@ -404,10 +408,10 @@ def _zodiac_plays(zodiac: Dict[str, List[str]]) -> List[Play]:
         Play("lianxiao", "连肖",
              r"[一二两三四五六1-6]?\s*连肖\s*((?:%s)+)" % sxs,
              _r_lianxiao2, 93, mode="flat"),
-        # 中二/中三：生肖在前或在后都认，整注一笔
-        Play("zhong", "中二/中三", r"((?:%s)+)\s*(?:二中二|三中二|三中三)" % sxs,
+        # 中二/中三/中四/中五/中六：生肖在前或在后都认，整注一笔
+        Play("zhong", "中二/中三", r"((?:%s)+)\s*%s" % (sxs, _ZHONG_WORDS),
              _r_zhong_sx, 94, mode="flat"),
-        Play("zhong", "中二/中三", r"(?:二中二|三中二|三中三)\s*((?:%s)+)" % sxs,
+        Play("zhong", "中二/中三", r"%s\s*((?:%s)+)" % (_ZHONG_WORDS, sxs),
              _r_zhong2, 94, mode="flat"),
     ]
     out += [Play("zodiac:%s" % sx, "生肖", r"(%s)" % re.escape(sx), _r_zodiac, 40)
@@ -606,7 +610,7 @@ def _scan(body: str, zodiac: Dict[str, List[str]], sx_chars: str):
     flat: List[str] = []
     work = body
     guard = 0
-    plays = PLAYS + _zodiac_plays(zodiac)
+    plays = sorted(PLAYS + _zodiac_plays(zodiac), key=lambda p: -p.priority)
 
     while work.strip() and guard < 40:
         guard += 1
@@ -665,15 +669,17 @@ def parse_item(raw: str, zodiac: Dict[str, List[str]], sx_chars: str) -> Optiona
     unit, body = _take_unit(s, sx_chars)
     nums, names, rest, flat = _scan(body, zodiac, sx_chars)
 
+    if flat:
+        # 平特/连肖/中二… 不落号码盘，项里那个孤零零的数字只能是钱：
+        # 鼠牛二中二20 = 20 元（不是 20 号）；鼠牛二中二100 同理
+        m_tail = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*", rest or "")
+        if m_tail:
+            unit = float(m_tail.group(1))
+            rest = ""
+
     extra, leftover = _take_numbers(rest)
     if leftover.strip():
-        # flat 项（平特/连肖/中二）末尾剩下的数字就是整笔金额：
-        # "鼠牛二中二100" 里的 100 不可能是号码（号码最大 49），只能当钱。
-        tail = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*", leftover)
-        if flat and tail and float(tail.group(1)) > 49:
-            unit = float(tail.group(1))
-        else:
-            return None                      # 还有认不出的碎片，整项交模型
+        return None                          # 还有认不出的碎片，整项交模型
     if extra:
         nums |= extra
         # 不再往描述里塞 "N个号"：回复文案会把号码逐个列出来，写个数是多余的

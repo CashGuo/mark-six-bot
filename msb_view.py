@@ -240,6 +240,14 @@ def market_totals(account: str = "") -> dict:
 # ---------------- 生肖注（平特 / 连肖 / 二中二 / 三中三） ----------------
 _CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6}
 
+_ZHONG_RE = re.compile(r"([一二两三四五六])\s*中\s*([一二两三四五六])")
+
+
+def zhong_label(text: str = "") -> str:
+    """从「蛇马二中二10」这类原文里取出玩法名：二中二 / 三中三 / 四中四 / 五中五 / 六中六。"""
+    m = _ZHONG_RE.search(str(text or ""))
+    return (m.group(1) + "中" + m.group(2)) if m else "二中二"
+
 
 def others_items(account: str = "", market: str = "MO") -> list:
     """不计号的钱逐条明细（平特整肖 / 连肖 / 二中二…）。空账号 = 所有账号。"""
@@ -287,6 +295,7 @@ def zodiac_board(account: str = "", market: str = "MO") -> dict:
 
     items = others_items(account, market)
     combo, unknown = [], []
+    combo_groups: dict = {}
     tot = {"board": 0.0, "combo": 0.0, "unknown": 0.0}
 
     for it in items:
@@ -300,11 +309,22 @@ def zodiac_board(account: str = "", market: str = "MO") -> dict:
         zs = [ch for ch in str(it.get("zodiacs") or "") if ch in ZODIAC_ANIMALS] \
             or extract_zodiacs(text)
         if play == "zhong" or ("中" in text and "连肖" not in text and "平" not in text):
+            label = zhong_label(text)
+            zord = [z for z in ZODIAC_ANIMALS if z in zs]
             combo.append({"text": text, "amount": amt, "zodiacs": zs,
+                          "label": label,
                           "ts": str(it.get("ts") or ""),
                           "need": ("6 个平特号同时有 " + "、".join(zs))
                                   if zs else "按原文核对"})
             tot["combo"] = round(tot["combo"] + amt, 2)
+            # 同类玩法 + 同一组生肖 = 一笔：港澳、不同下单人写一样的注，金额加在一起
+            key = (label, "".join(zord))
+            g = combo_groups.get(key)
+            if g is None:
+                combo_groups[key] = g = {"label": label, "zodiacs": list(zord),
+                                         "amount": 0.0, "count": 0}
+            g["amount"] = round(g["amount"] + amt, 2)
+            g["count"] += 1
             continue
         if not zs:
             unknown.append({"text": text, "amount": amt,
@@ -344,8 +364,14 @@ def zodiac_board(account: str = "", market: str = "MO") -> dict:
             r["amount"] = round(r["amount"] + per[z], 2)
         tot["board"] = round(tot["board"] + sum(per.values()), 2)
 
-    return {"rows": rows, "combo": combo[-12:], "unknown": unknown[-6:],
-            "totals": tot, "count": len(items)}
+    # 组合注按「玩法 + 生肖组合」归并，按 中二→中六、生肖传统序排；只留有注的
+    groups = sorted(
+        combo_groups.values(),
+        key=lambda g: (_CN_NUM.get(g["label"][0], 9), g["label"],
+                       [ZODIAC_ANIMALS.index(z) for z in g["zodiacs"]]),
+    )
+    return {"rows": rows, "combo": combo[-12:], "combo_groups": groups,
+            "unknown": unknown[-6:], "totals": tot, "count": len(items)}
 
 
 def grid_from(data: dict) -> list:

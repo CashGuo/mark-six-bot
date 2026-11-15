@@ -72,6 +72,16 @@ td.who{white-space:nowrap;color:#1f6feb;font-weight:700}
 .zamt{font-size:15px;font-weight:800}
 .zamt.hot{font-size:17px;font-weight:800;color:var(--red)}
 
+/* 组合注：一行一种玩法，类型名按玩法上色 */
+.cbox{display:flex;align-items:baseline;gap:10px;padding:8px 12px;
+ border-bottom:1px solid var(--bd2)}
+.clb{font-size:14px;font-weight:800;white-space:nowrap}
+.czs{font-size:14.5px;font-weight:800;color:#111827;white-space:nowrap}
+.camt{font-size:15px;font-weight:800;color:var(--red);margin-left:auto;
+ font-variant-numeric:tabular-nums;white-space:nowrap}
+.csum{font-size:14px;font-weight:800;color:#111827;padding:9px 12px;
+ background:#fafbfc;border-bottom:1px solid var(--bd2)}
+
 .foot{margin-top:10px;color:#98a1ad;font-size:12px;padding-left:2px}
 .mini{display:inline-block;padding:1px 7px;border-radius:10px;font-size:12px;
  border:1px solid var(--bd2);color:var(--dim);background:#fafbfc}
@@ -144,7 +154,7 @@ td.wxid{color:#8a929e;font-size:11.5px;word-break:break-all;max-width:280px}
   </div>
 
   <div class="panel" style="margin-top:10px">
-    <div class="ph">组合注（二中二 / 三中三） <span>整注，不摊到单肖</span></div>
+    <div class="ph">组合注（中二～中六） <span>整注，不摊到单肖 · 港澳合并</span></div>
     <div id="zxbCombo"></div>
   </div>
 
@@ -249,23 +259,45 @@ function renderZxBoard(id, b){
   </table>${has ? '' : '<div class="empty" style="padding:8px 0 10px">本期还没有平特 / 连肖的注</div>'}`;
 }
 
+/* 组合注：一行一种玩法，同类同生肖合并，港澳合并；有注才出现 */
+const ZHONG_CLR = {二:'#1f6feb', 三:'#7c3aed', 四:'#c2410c', 五:'#c0392b', 六:'#0f766e'};
+const ZHONG_RANK = {二:2, 三:3, 四:4, 五:5, 六:6};
+const ZS_ORDER = '鼠牛虎兔龙蛇马羊猴鸡狗猪'.split('');
+
 function renderCombo(list){
   const el = document.getElementById('zxbCombo');
   if (!list || !list.length){
-    el.innerHTML = '<div class="empty">本期还没有二中二 / 三中三的注</div>';
+    el.innerHTML = '<div class="empty">本期还没有组合注（中二～中六）</div>';
     return;
   }
-  el.innerHTML = `<table>
-    <tr><th style="width:150px">时间</th><th style="width:56px">市场</th>
-        <th class="tr" style="width:82px">金额</th><th style="width:190px">原文</th><th>命中条件</th></tr>
-    ${list.map(x => `<tr>
-      <td class="num2">${esc(x.ts)}</td>
-      <td>${esc(x.mk)}</td>
-      <td class="num2 tr hot">${fmt(x.amount)}</td>
-      <td class="txt">${esc(x.text)}</td>
-      <td class="txt">${esc(x.need)}</td>
-    </tr>`).join('')}
-  </table>`;
+  // 同 label + 同生肖组合的合成一笔
+  const agg = {};
+  list.forEach(function (x) {
+    const lb = String(x.label || '二中二');
+    const zs = (x.zodiacs || []).filter(Boolean);
+    const key = lb + '|' + zs.slice().sort(function (a, b) {
+      return ZS_ORDER.indexOf(a) - ZS_ORDER.indexOf(b);
+    }).join('');
+    if (!agg[key]) agg[key] = {label: lb, zodiacs: zs, amount: 0};
+    agg[key].amount += Number(x.amount || 0);
+  });
+  const rows = Object.values(agg).sort(function (a, b) {
+    const ra = ZHONG_RANK[a.label[0]] || 9, rb = ZHONG_RANK[b.label[0]] || 9;
+    if (ra !== rb) return ra - rb;
+    const za = a.zodiacs.map(z => ZS_ORDER.indexOf(z)).join(',');
+    const zb2 = b.zodiacs.map(z => ZS_ORDER.indexOf(z)).join(',');
+    return za.localeCompare(zb2);
+  });
+  let total = 0;
+  el.innerHTML = rows.map(function (g) {
+    total += g.amount;
+    const clr = ZHONG_CLR[g.label[0]] || 'var(--blue)';
+    return `<div class="cbox">
+      <span class="clb" style="color:${clr}">${esc(g.label)} ：</span>
+      <span class="czs">${esc(g.zodiacs.join('+'))}</span>
+      <span class="camt">共 ${fmt(g.amount)} 元</span>
+    </div>`;
+  }).join('') + `<div class="csum">合计：${fmt(total)} 元</div>`;
 }
 
 async function load(){
@@ -317,13 +349,13 @@ async function load(){
     const zb = d.zodiac_board || {};
     renderZxBoard('zxbMO', zb.MO);
     renderZxBoard('zxbHK', zb.HK);
+    // 组合注按「玩法 + 生肖组合」合并，港澳算一份：同类同肖的注金额加在一起
     let combo = [];
     ['MO', 'HK'].forEach(function (m) {
-      ((zb[m] || {}).combo || []).forEach(function (x) {
-        combo.push(Object.assign({}, x, {mk: m === 'MO' ? '澳门' : '香港'}));
+      ((zb[m] || {}).combo_groups || []).forEach(function (x) {
+        combo.push(Object.assign({}, x));
       });
     });
-    combo.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
     renderCombo(combo);
 
     if (!d.recent.length){

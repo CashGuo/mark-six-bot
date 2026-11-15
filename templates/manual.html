@@ -158,6 +158,9 @@ tr.sel{background:#f3f7fd}
             <button data-m="lx">连肖</button>
             <button data-m="zh2">二中二</button>
             <button data-m="zh3">三中三</button>
+            <button data-m="zh4">四中四</button>
+            <button data-m="zh5">五中五</button>
+            <button data-m="zh6">六中六</button>
           </div>
           <div class="seg" id="zxLen" style="display:none;width:fit-content;margin-top:8px">
             <button data-l="2">2连</button>
@@ -324,6 +327,10 @@ function renderZx() {
   paintZx();
 }
 
+/* 组合注：中二要 2 个肖，中三 3 个……中六 6 个 */
+const ZH_NEED = {zh2: 2, zh3: 3, zh4: 4, zh5: 5, zh6: 6};
+const ZH_NAME = {zh2: "二中二", zh3: "三中三", zh4: "四中四", zh5: "五中五", zh6: "六中六"};
+
 function zxSet() {
   const picked = ZORDER.filter(z => ZX.z.has(z));
   if (ZX.mode === "lx" && picked.length) {
@@ -337,8 +344,8 @@ function zxSet() {
 function zxCalc() {
   const zs = zxSet();
   const amt = Number($("amt").value || 0);
-  if (ZX.mode === "zh2" || ZX.mode === "zh3") {
-    const need = ZX.mode === "zh2" ? 2 : 3;
+  const need = ZH_NEED[ZX.mode];
+  if (need) {
     if (zs.length < need) return { zs: zs, per: null, need: need, total: 0 };
     const pick = zs.slice(0, need);
     // 组合注默认整注；点「各」就是每肖各这么多，两肖各 10 = 20
@@ -360,7 +367,7 @@ function zxCalc() {
 }
 
 function zxName() {
-  return { pt: "平特", lx: ZX.len + "连肖", zh2: "二中二", zh3: "三中三" }[ZX.mode];
+  return ZH_NAME[ZX.mode] || (ZX.mode === "lx" ? ZX.len + "连肖" : "平特");
 }
 
 function paintZx() {
@@ -380,7 +387,7 @@ function paintZx() {
   const need = c.need || 0;
   if (!c.zs.length) {
     h.className = "hint";
-    h.textContent = (ZX.mode === "zh2" || ZX.mode === "zh3")
+    h.textContent = ZH_NEED[ZX.mode]
       ? ("点 " + need + " 个生肖（" + zxName() + "）")
       : (ZX.mode === "lx"
           ? ("点一个生肖，从它往后连 " + ZX.len + " 个")
@@ -401,16 +408,16 @@ function paintZx() {
     return;
   }
   h.className = "hint ok";
-  const zhongEach = (ZX.mode === "zh2" || ZX.mode === "zh3") && ZX.split === "each";
+  const zhongEach = !!ZH_NEED[ZX.mode] && ZX.split === "each";
   h.textContent = c.per
     ? (zxName() + " " + c.zs.join("+") + " → 每肖 " + money(c.per[c.zs[0]])
        + "，共 " + money(c.total) + " 元")
     : (zhongEach
         ? (zxName() + " " + c.zs.join("+") + " → 各 " + money(c.eachOne) + " ×"
-           + c.zs.length + " 肖 = " + money(c.total) + " 元（6 个平特号同时有 "
-           + c.zs.join("、") + "）")
+           + c.zs.length + " 肖 = " + money(c.total) + " 元（" + c.zs.length
+           + " 个肖同时命中）")
         : (zxName() + " " + c.zs.join("+") + " → 整注 " + money(c.total)
-           + " 元（6 个平特号同时有 " + c.zs.join("、") + "）"));
+           + " 元（" + c.zs.length + " 个肖同时命中）"));
   add.disabled = false;
 }
 
@@ -421,8 +428,7 @@ function numText(v) {
 }
 function zxText(c) {
   const all = c.zs.join("");
-  if (ZX.mode === "zh2") return all + "二中二" + numText(c.total);
-  if (ZX.mode === "zh3") return all + "三中三" + numText(c.total);
+  if (ZH_NEED[ZX.mode]) return all + ZH_NAME[ZX.mode] + numText(c.total);
   if (ZX.mode === "lx") return all + Math.max(2, c.zs.length) + "连肖" + numText(c.total);
   if (ZX.split === "each") return "平特" + all + "各" + numText(c.per[c.zs[0]]);
   return "平特" + all + numText(c.total);
@@ -435,7 +441,7 @@ function zxAddNote() {
   if (!(Number($("amt").value || 0) > 0)) return toast("先在右边填金额", "bad");
   const vals = c.per ? c.zs.map(z => c.per[z]) : [];
   const same = vals.length && vals.every(v => Math.abs(v - vals[0]) < 1e-9);
-  const zhongEach = (ZX.mode === "zh2" || ZX.mode === "zh3") && ZX.split === "each";
+  const zhongEach = !!ZH_NEED[ZX.mode] && ZX.split === "each";
   const eachTxt = c.per
     ? (same ? "每肖 " + money(vals[0]) : "分摊 " + vals.map(v => money(v)).join("/"))
     : (zhongEach ? "各 " + money(c.eachOne) + " ×" + c.zs.length : "整注");
