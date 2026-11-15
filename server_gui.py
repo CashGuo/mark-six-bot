@@ -1798,7 +1798,8 @@ class MainWindow:
 
     def open_quick(self):
         """粘文本记账：客户原文只错一个字时，改一下就能记，不用等对方重发。"""
-        QuickBetDialog(self.root, self.acc or "default",
+        accs = msb_view.all_accounts()
+        QuickBetDialog(self.root, self.acc or (accs[0] if accs else ""),
                        chats=self._recent_chats(), on_done=self.refresh_overview)
 
     def do_reset(self):
@@ -1949,7 +1950,7 @@ class QuickBetDialog(tk.Toplevel):
     def __init__(self, master, account: str, chats=None, on_done=None):
         super().__init__(master)
         self.title("文本记账")
-        self.account = account or "default"
+        self.account = account or ""
         self.chats = list(chats or [])
         self.on_done = on_done
         self.configure(bg=CLR_BG)
@@ -1970,8 +1971,8 @@ class QuickBetDialog(tk.Toplevel):
         # 账必须落到具体账号上：主界面停在「全部账号（合计）」时没有账号可记，
         # 所以这里给下拉，默认取主界面选中的那个，没选就取唯一/第一个账号。
         self._accounts = self._load_accounts()
-        if self._accounts and self.account not in self._accounts:
-            self.account = self._accounts[0]
+        if self.account not in self._accounts:
+            self.account = self._accounts[0] if self._accounts else ""
         self.v_acc = tk.StringVar(value=self.account)
         ttk.Combobox(row, textvariable=self.v_acc, state="readonly", font=FONT_S,
                      values=self._accounts, width=18).pack(side="left", padx=(6, 16))
@@ -2032,7 +2033,11 @@ class QuickBetDialog(tk.Toplevel):
         out = [a for a in out if a]
         if out:
             return out
-        return [self.account] if self.account else []
+        try:
+            out = msb_view.all_accounts()
+        except Exception:
+            out = []
+        return out or ([self.account] if self.account else [])
 
     def _text(self) -> str:
         return (self.txt.get("1.0", "end") or "").strip()
@@ -2066,6 +2071,9 @@ class QuickBetDialog(tk.Toplevel):
             self._show("先粘一段文本", CLR_MUTED)
             return
         acc = (self.v_acc.get() or "").strip() or self.account
+        if not acc:
+            self._show("没有可记的账号，先在控制台里选一个账号", CLR_BAD)
+            return
         chat = (self.v_chat.get() or "").strip()
         d = api_post("/api/quick_bet", {"text": t, "account": acc, "chat": chat})
         if not d.get("ok"):
@@ -2139,7 +2147,7 @@ class ManualBetDialog(tk.Toplevel):
         self.grid = list(grid or [])
         self.chats = list(chats or [])
         self.on_submit = on_submit
-        self.account = account or "default"
+        self.account = account or ""
 
         self.notes = []                 # 已加入的注：text/label/nums/each/total
         self.sel_nums = set()           # 直接点的号
@@ -2163,8 +2171,8 @@ class ManualBetDialog(tk.Toplevel):
         self.v_loop = tk.BooleanVar(value=False)
 
         self._accounts = self._load_accounts()
-        if self._accounts and self.account not in self._accounts:
-            self.account = self._accounts[0]
+        if self.account not in self._accounts:
+            self.account = self._accounts[0] if self._accounts else ""
         self.v_acc = tk.StringVar(value=self.account)
 
         self._build()
@@ -2187,13 +2195,26 @@ class ManualBetDialog(tk.Toplevel):
             self.after(300, self._demo)
 
     def _load_accounts(self):
-        """账号下拉：只列真接过账的号，免得选到一个不存在的账号。"""
+        """账号下拉：只列真接过账的号，免得选到一个不存在的账号。
+
+        主窗口停在「全部账号（合计）」时传进来是空字符串；这时不能拿
+        "default" 兜底 —— 那是个测试号，一记就又冒出来了。改成选真有账的那个。
+        """
         d = api_get("/api/accounts")
-        out = [str(a.get("account") or "") for a in (d.get("accounts") or [])]
-        out = [a for a in out if a]
-        if out:
-            return out
-        return [self.account] if self.account else []
+        items = d.get("accounts") or []
+        out = [str(a.get("account") or "") for a in items if a.get("account")]
+        if not out:
+            try:
+                out = msb_view.all_accounts()
+            except Exception:
+                out = []
+        if not out and self.account:
+            out = [self.account]
+        if not self.account and out:
+            tops = {str(a.get("account")): float(a.get("grand_total") or 0)
+                    for a in items}
+            out = sorted(out, key=lambda a: -tops.get(a, 0.0))
+        return out
 
     # ---------- 字号 ----------
     def _font(self, kind="body"):
@@ -2659,14 +2680,31 @@ class ManualBetDialog(tk.Toplevel):
 
     def _refresh_foot(self):
         chat = (self.v_chat.get() or "").strip()
-        ok = bool(self.notes) and bool(chat) and not self._busy
+        # 只按「有没有清单 / 忙不忙」决定能不能点。缺对象时不灰按钮，
+        # 让用户点了能看到「填一下挂在谁名下」，否则按钮点不动像是坏了。
+        ok = bool(self.notes) and not self._busy
         try:
             self.btn_ok.configure(state="normal" if ok else "disabled",
                                   bg=CLR_BLUE if ok else "#9bb4dd")
         except Exception:
             pass
         if self.notes and not chat:
-            self._say("填一下挂在谁名下")
+            self._chat_warn = True
+            try:
+                if self._event:
+                    self.after_cancel(self._event)
+                    self._event = None
+                self.lb_note.configure(text="还差一步：填「挂在谁名下」再点记账", fg=CLR_BAD)
+            except Exception:
+                pass
+        elif getattr(self, "_chat_warn", False):
+            self._chat_warn = False
+            try:
+                # 只清掉自己那句提醒，别把「已记账…」之类的消息抹掉
+                if "挂在谁名下" in (self.lb_note.cget("text") or ""):
+                    self.lb_note.configure(text="")
+            except Exception:
+                pass
 
     def _say(self, msg, color=CLR_BAD):
         try:
@@ -2751,6 +2789,9 @@ class ManualBetDialog(tk.Toplevel):
                 return
         mk = self.v_market.get()
         acc = (self.v_acc.get() or "").strip() or self.account
+        if not acc:
+            self._say("没有可记的账号，先在控制台里选一个账号", CLR_BAD)
+            return
         each = [(n["text"], n["each"]) for n in self.notes]
 
         self._busy = True
