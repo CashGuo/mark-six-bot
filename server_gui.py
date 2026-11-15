@@ -2177,14 +2177,21 @@ class ManualBetDialog(tk.Toplevel):
 
         self._build()
         self.update_idletasks()
-        w, h = 1060, 920
+        # 内容多（43 个玩法 + 49 个号），窗口给宽一点高一点
+        w, h = 1280, 1010
         try:
             x = master.winfo_rootx() + max(0, (master.winfo_width() - w) // 2)
             y = master.winfo_rooty() + max(0, (master.winfo_height() - h) // 2)
         except Exception:
             x = y = 0
-        self.geometry("%dx%d+%d+%d" % (w, h, max(0, x), max(0, y)))
-        self.minsize(980, 800)
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w = min(w, sw - 60)
+        h = min(h, sh - 90)
+        x = max(0, min(x, sw - w - 20))
+        y = max(0, min(y, sh - h - 60))
+        self.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        self.minsize(1120, 860)
         self.update()
         self._repaint()
         try:
@@ -2354,12 +2361,26 @@ class ManualBetDialog(tk.Toplevel):
                 lb.bind("<Button-1>", lambda e, x=n: self._pick_num(x))
                 self._num_lb[n] = lb
 
-        # 右栏：Canvas 竖滚。玩法按钮多，窗口一矮就得能滚
+        # 右栏：选法说明固定在上，条件区竖滚，金额行固定在底部
         rcard = tk.Frame(body, bg=CLR_CARD, highlightbackground=CLR_LINE,
                          highlightthickness=1)
         rcard.grid(row=0, column=1, sticky="ns", padx=(0, 0))
-        self.canvas = tk.Canvas(rcard, bg=CLR_CARD, highlightthickness=0, width=372)
-        vsb = ttk.Scrollbar(rcard, orient="vertical", command=self.canvas.yview)
+        rcard.grid_rowconfigure(1, weight=1)
+        rcard.grid_columnconfigure(0, weight=1)
+
+        self.lb_rule = tk.Label(
+            rcard,
+            text="生肖多选＝并集（牛+马 共 9 个号）｜玩法多选＝交集（大+单 共 13 个号）"
+                 "｜生肖和玩法一起选，两边再取交集",
+            font=self._font("tiny"), bg=CLR_CARD, fg="#6b7280",
+            justify="left", anchor="w", wraplength=440)
+        self.lb_rule.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 2))
+        self._fw.append((self.lb_rule, "tiny"))
+
+        mid = tk.Frame(rcard, bg=CLR_CARD)
+        mid.grid(row=1, column=0, sticky="nsew")
+        self.canvas = tk.Canvas(mid, bg=CLR_CARD, highlightthickness=0, width=452)
+        vsb = ttk.Scrollbar(mid, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -2373,36 +2394,37 @@ class ManualBetDialog(tk.Toplevel):
         self.canvas.bind("<MouseWheel>", self._wheel)
         self.ops.bind("<MouseWheel>", self._wheel)
 
-        # 金额
-        self._lbl(self.ops, "金额（每个号各多少）", "small", bg=CLR_CARD,
-                  fg=CLR_MUTED).pack(anchor="w", padx=12, pady=(10, 0))
-        q = tk.Frame(self.ops, bg=CLR_CARD)
-        q.pack(fill="x", padx=12, pady=(4, 0))
+        # 金额：快捷额度、输入框、加入 —— 三个一行，钉在右栏底部不跟着滚
+        amtbar = tk.Frame(rcard, bg=CLR_CARD)
+        amtbar.grid(row=2, column=0, sticky="ew")
+        tk.Frame(amtbar, bg=CLR_LINE, height=1).pack(fill="x")
+        row = tk.Frame(amtbar, bg=CLR_CARD)
+        row.pack(fill="x", padx=10, pady=8)
+        self._lbl(row, "每号", "small", bg=CLR_CARD, fg=CLR_MUTED
+                  ).pack(side="left")
         for a in self.QUICK_AMTS:
-            b = tk.Label(q, text=a, font=self._font("small"), bg="#eef0f3",
-                         fg="#374151", padx=7, pady=3, cursor="hand2")
-            b.pack(side="left", padx=(0, 4))
+            b = tk.Label(row, text=a, font=self._font("small"), bg="#eef0f3",
+                         fg="#374151", padx=5, pady=3, cursor="hand2")
+            b.pack(side="left", padx=(4, 0))
             b.bind("<Button-1>", lambda e, v=a: self._quick_amt(v))
             self._fw.append((b, "small"))
 
-        row = tk.Frame(self.ops, bg=CLR_CARD)
-        row.pack(fill="x", padx=12, pady=(6, 0))
-        self.en_amt = tk.Entry(row, textvariable=self.v_amt, font=self._font("body"),
-                               width=10, relief="flat", bg="#fbfcfd", fg="#111827",
-                               highlightbackground=CLR_LINE, highlightthickness=1,
-                               justify="right", insertbackground="#111827")
-        self.en_amt.pack(side="left", ipady=3)
-        self.en_amt.bind("<Return>", lambda e: self._add())
         self.btn_add = tk.Button(row, text="加入", font=self._font("body"),
                                  bg=CLR_BLUE2, fg="white", relief="flat", bd=0,
-                                 width=6, cursor="hand2", command=self._add)
-        self.btn_add.pack(side="left", padx=(8, 0))
+                                 width=5, cursor="hand2", command=self._add)
+        self.btn_add.pack(side="right", padx=(6, 0))
+        self.en_amt = tk.Entry(row, textvariable=self.v_amt, font=self._font("body"),
+                               width=7, relief="flat", bg="#fbfcfd", fg="#111827",
+                               highlightbackground=CLR_LINE, highlightthickness=1,
+                               justify="right", insertbackground="#111827")
+        self.en_amt.pack(side="right", padx=(6, 0), ipady=3)
+        self.en_amt.bind("<Return>", lambda e: self._add())
         self._fw.append((self.en_amt, "body"))
         self._fw.append((self.btn_add, "body"))
 
         # 生肖
         self._lbl(self.ops, "生肖（可多选，取并集）", "small", bg=CLR_CARD,
-                  fg=CLR_MUTED).pack(anchor="w", padx=12, pady=(12, 2))
+                  fg=CLR_MUTED).pack(anchor="w", padx=12, pady=(10, 2))
         zg = tk.Frame(self.ops, bg=CLR_CARD)
         zg.pack(fill="x", padx=12)
         for i, rowd in enumerate(self.grid):
@@ -2423,7 +2445,7 @@ class ManualBetDialog(tk.Toplevel):
                       fg="#9aa3af").pack(anchor="w", padx=12, pady=(9, 1))
             gf = tk.Frame(self.ops, bg=CLR_CARD)
             gf.pack(fill="x", padx=12)
-            cols = 6 if len(items) <= 6 else 5
+            cols = 7 if len(items) <= 7 else 6
             for i, (disp, code) in enumerate(items):
                 r, c = divmod(i, cols)
                 b = tk.Label(gf, text=disp, font=self._font("small"), bg="#f7f8fa",
@@ -2466,7 +2488,7 @@ class ManualBetDialog(tk.Toplevel):
         except Exception:
             pass
         self.tv = ttk.Treeview(tv_wrap, columns=("desc", "each", "sub"),
-                               show="headings", style="Man.Treeview", height=5)
+                               show="headings", style="Man.Treeview", height=6)
         self.tv.heading("desc", text="记什么")
         self.tv.heading("each", text="每号")
         self.tv.heading("sub", text="小计")
@@ -2508,6 +2530,16 @@ class ManualBetDialog(tk.Toplevel):
         self.bind("<Escape>", lambda e: self._close())
         self.bind("<Control-Return>", lambda e: self._submit())
         self.bind("<Configure>", self._on_conf)
+        self._bind_wheel(self.ops)
+
+    def _bind_wheel(self, w):
+        """滚轮事件只管给 Canvas，鼠标在生肖/玩法按钮上也要能滚。"""
+        try:
+            w.bind("<MouseWheel>", self._wheel)
+            for c in w.winfo_children():
+                self._bind_wheel(c)
+        except Exception:
+            pass
 
     # ---------- 点选 ----------
     def _wheel(self, e):
