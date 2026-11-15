@@ -136,7 +136,8 @@ def main():
     check("GET /api/issues", st == 200 and js and js.get("ok") is not False, str(js)[:80])
 
     st, js, txt = call("GET", "/recent")
-    check("GET /recent", st == 200 and len(txt or "") > 200, "%d 字节" % len(txt or ""))
+    check("GET /recent", st == 200 and isinstance(js, dict) and "records" in js,
+          "%s 笔" % len((js or {}).get("records") or []))
 
     st, js, txt = call("GET", "/logs")
     check("GET /logs", st == 200, "%d 字节" % len(txt or ""))
