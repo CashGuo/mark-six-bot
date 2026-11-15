@@ -430,7 +430,9 @@ class MainWindow:
         # 程序名在窗口标题栏上已经有了，去掉。
         card = tk.Frame(self.root, bg=CLR_CARD, highlightbackground=CLR_LINE,
                         highlightthickness=1)
-        card.pack(fill="x", padx=16, pady=(12, 8))
+        # 顶部状态卡（运行中 / 端口 / 看板地址 / 账号累计今日）不上屏了：
+        # 用户说这些不重要、还占高度，省下来给号码盘。控件照旧创建，
+        # _refresh_status 照旧 configure，只是不 pack 到窗口上。
         inner = tk.Frame(card, bg=CLR_CARD)
         inner.pack(fill="x", padx=14, pady=10)
 
@@ -559,8 +561,9 @@ class MainWindow:
         # 这里不能用 grid 权重 —— 12 行大字号会把自己的请求高度顶上去，
         # 权重再小也压不下来（实测给 6:7 也还是 55%）。
         # 左上：澳门、香港两个号码盘，左澳右港同时显示
+        # 左上：澳门、香港两个号码盘，左澳右港同时显示。
+        # 高度 = 全部高度的 60% 再让出下面「平特」那一块（固定 240），号码盘吃剩下的。
         garea = tk.Frame(left, bg=CLR_BG)
-        garea.place(x=0, y=0, relwidth=1.0, relheight=0.25)
         for mk, title in (("MO", " 澳门 号码盘 "), ("HK", " 香港 号码盘 ")):
             gp = tk.LabelFrame(garea, text=title, font=FONT_B, bg=CLR_BG,
                                fg="#111827", bd=1, relief="groove")
@@ -569,13 +572,12 @@ class MainWindow:
             holder.pack(fill="both", expand=True, padx=5, pady=5)
             self.grid_holder[mk] = holder
 
-        # 中段：生肖金额（平特 + 连肖合并成一列）+ 组合注（二中二、三中二、三中三…）。
-        # 这两类钱不落 49 号盘，之前只能在「不计号」那个总数里看到一个合计。
-        zbp = tk.LabelFrame(left,
-                            text=" 生肖金额（平特 + 连肖合并一列）· 组合注（整注 · 港澳合并 · 同类合并） ",
+        # 中段：平特 / 连肖 / 组合注（这几类钱不落 49 号盘，只记总额）。
+        # 高度固定 240（内容就 6 行那么高），不再按比例浮动，多的空间全给号码盘。
+        zbp = tk.LabelFrame(left, text=" 平特 ",
                             font=("Microsoft YaHei UI", 12, "bold"), bg=CLR_BG,
                             fg="#111827", bd=1, relief="groove")
-        zbp.place(x=0, rely=0.25, relwidth=1.0, relheight=0.33)
+
         # 组合注按整注记，不进生肖表：右侧竖排一列，一行一种玩法，港澳合并，有注才出现。
         # 必须先 pack 右侧再 pack 生肖区，否则 expand 的生肖区会把这一列压到几十像素。
         self.combo_wrap = tk.Frame(zbp, bg="#fbfcfd", highlightbackground="#e3e7ec",
@@ -588,6 +590,8 @@ class MainWindow:
         zin.pack(side="left", fill="both", expand=True, padx=(6, 2), pady=(4, 2))
         self._zx_cells = {}
         self._zx_total = {}
+        # 上下各垫一块会伸缩的空白，让澳门/香港两行垂直居中，不在顶部堆成一坨
+        tk.Frame(zin, bg=CLR_BG).pack(fill="both", expand=True)
         for mk, name in (("MO", "澳门"), ("HK", "香港")):
             rf = tk.Frame(zin, bg=CLR_BG)
             rf.pack(fill="x", pady=2)
@@ -613,10 +617,26 @@ class MainWindow:
                                bg="#fafbfc", fg=CLR_RED)
                 amt.pack(side="left", padx=(0, 3))
                 self._zx_cells[mk].append(amt)
-        # 左下：最近记账，钉在底部，高度占 51%，宽度就到排序区起点
+        tk.Frame(zin, bg=CLR_BG).pack(fill="both", expand=True)
+        # 左下：最近记账，接在「平特」下面一直到底
         bp = tk.LabelFrame(left, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
                            fg="#111827", bd=1, relief="groove")
-        bp.place(x=0, rely=1.0, anchor="sw", relwidth=1.0, relheight=0.42)
+
+        # 三块的高度关系：号码盘钝 1 吃掉全部剩余，平特固定 240，最近记账固定 360。
+        # 用 grid 的 minsize + weight 钉死：pack 里 expand 那块会把后面的请求高度吃光，
+        # 结果平特被压成 0（踩过），所以这里走 grid。
+        left.grid_columnconfigure(0, weight=1)
+        # 不让 grid 子控件把 left 的请求尺寸顶大 —— 否则两个号码盘会把右边排序栏挤掉
+        left.grid_propagate(False)
+        left.grid_rowconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=0, minsize=200)
+        left.grid_rowconfigure(2, weight=0, minsize=250)
+        garea.grid(row=0, column=0, sticky="nsew")
+        zbp.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        zbp.grid_propagate(False)
+        bp.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
+        bp.grid_propagate(False)
+
 
         # 过滤条：按期看。选项是具体三个期（本期 / 前一期 / 前二期），
         # 不是「最近 N 期」这种含糊说法 —— 选中哪一期就只显示那一期。
@@ -806,18 +826,18 @@ class MainWindow:
         for i, g in enumerate(rows):
             tk.Label(self.combo_box, text=g["label"], bg=CLR_BG, anchor="w",
                      fg=zhong_color(g["label"]),
-                     font=("Microsoft YaHei UI", 10, "bold")
+                     font=("Microsoft YaHei UI", 9, "bold")
                      ).grid(row=i, column=0, sticky="w", pady=0)
             tk.Label(self.combo_box, text="+".join(g["zodiacs"]) or "—", bg=CLR_BG,
                      fg="#111827", wraplength=230, justify="left", anchor="w",
-                     font=("Microsoft YaHei UI", 10, "bold")
+                     font=("Microsoft YaHei UI", 9, "bold")
                      ).grid(row=i, column=1, sticky="w", padx=(6, 6), pady=0)
             tk.Label(self.combo_box, text="共%s元" % fmt_money(g["amount"]), bg=CLR_BG,
                      fg=CLR_RED, font=("Consolas", 10, "bold")
                      ).grid(row=i, column=2, sticky="e", pady=0)
             total = round(total + g["amount"], 2)
         tk.Label(self.combo_box, text="合计：%s 元" % fmt_money(total), bg=CLR_BG,
-                 fg="#111827", font=("Microsoft YaHei UI", 10, "bold")
+                 fg="#111827", font=("Microsoft YaHei UI", 9, "bold")
                  ).grid(row=len(rows), column=0, columnspan=3, sticky="w",
                         pady=(4, 0))
 
