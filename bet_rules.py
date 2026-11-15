@@ -770,11 +770,8 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
                 kind = "zhong"
             else:
                 kind = "pingte"
-            # 中二/中三是一整注，带不带「各」都按原文那个数走
-            if kind == "zhong":
-                amount = round(unit, 2)
-            else:
-                amount = round(unit * len(zs), 2) if (each and zs) else round(unit, 2)
+            # 带「各」＝每肖各这么多（两肖各 10 = 20）；不带就按原文整笔
+            amount = round(unit * len(zs), 2) if (each and zs) else round(unit, 2)
             play = got["desc"] or txt
             extras.append({
                 "play": play, "text": txt, "amount": amount,

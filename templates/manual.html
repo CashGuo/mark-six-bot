@@ -339,8 +339,12 @@ function zxCalc() {
   const amt = Number($("amt").value || 0);
   if (ZX.mode === "zh2" || ZX.mode === "zh3") {
     const need = ZX.mode === "zh2" ? 2 : 3;
-    return { zs: zs, per: null, need: need,
-             total: zs.length >= need ? amt : 0 };
+    if (zs.length < need) return { zs: zs, per: null, need: need, total: 0 };
+    const pick = zs.slice(0, need);
+    // 组合注默认整注；点「各」就是每肖各这么多，两肖各 10 = 20
+    const total = ZX.split === "each"
+      ? Math.round(amt * pick.length * 100) / 100 : amt;
+    return { zs: pick, per: null, need: need, total: total, eachOne: amt };
   }
   const n = zs.length;
   if (!n || !(amt > 0)) return { zs: zs, per: null, total: 0 };
@@ -397,11 +401,16 @@ function paintZx() {
     return;
   }
   h.className = "hint ok";
+  const zhongEach = (ZX.mode === "zh2" || ZX.mode === "zh3") && ZX.split === "each";
   h.textContent = c.per
     ? (zxName() + " " + c.zs.join("+") + " → 每肖 " + money(c.per[c.zs[0]])
        + "，共 " + money(c.total) + " 元")
-    : (zxName() + " " + c.zs.join("+") + " → 整注 " + money(c.total)
-       + " 元（6 个平特号同时有 " + c.zs.join("、") + "）");
+    : (zhongEach
+        ? (zxName() + " " + c.zs.join("+") + " → 各 " + money(c.eachOne) + " ×"
+           + c.zs.length + " 肖 = " + money(c.total) + " 元（6 个平特号同时有 "
+           + c.zs.join("、") + "）")
+        : (zxName() + " " + c.zs.join("+") + " → 整注 " + money(c.total)
+           + " 元（6 个平特号同时有 " + c.zs.join("、") + "）"));
   add.disabled = false;
 }
 
@@ -426,9 +435,10 @@ function zxAddNote() {
   if (!(Number($("amt").value || 0) > 0)) return toast("先在右边填金额", "bad");
   const vals = c.per ? c.zs.map(z => c.per[z]) : [];
   const same = vals.length && vals.every(v => Math.abs(v - vals[0]) < 1e-9);
+  const zhongEach = (ZX.mode === "zh2" || ZX.mode === "zh3") && ZX.split === "each";
   const eachTxt = c.per
     ? (same ? "每肖 " + money(vals[0]) : "分摊 " + vals.map(v => money(v)).join("/"))
-    : "整注";
+    : (zhongEach ? "各 " + money(c.eachOne) + " ×" + c.zs.length : "整注");
   NOTES.push({
     zx: true, flat: true, text: zxText(c), label: zxName() + " " + c.zs.join("+"),
     nums: [], each: (c.per ? c.per[c.zs[0]] : c.total),

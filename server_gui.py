@@ -571,8 +571,8 @@ class MainWindow:
             rf.pack(fill="x", pady=2)
             tk.Label(rf, text=name, font=("Microsoft YaHei UI", 12, "bold"),
                      bg=CLR_BG, fg="#374151", width=4, anchor="w").pack(side="left")
-            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 12, "bold"),
-                         bg=CLR_BG, fg="#111827", width=12, anchor="e")
+            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 11, "bold"),
+                         bg=CLR_BG, fg="#111827", width=20, anchor="e")
             t.pack(side="right", padx=(4, 0))
             self._zx_total[mk] = t
             cw = tk.Frame(rf, bg=CLR_BG)
@@ -757,7 +757,7 @@ class MainWindow:
                 board_tot = float((b.get("totals") or {}).get("board") or 0)
                 combo_tot = float((b.get("totals") or {}).get("combo") or 0)
                 t.configure(text="合计 %s" % fmt_money(board_tot)
-                            + (" ＋组合 %s" % fmt_money(combo_tot)
+                            + (" · 组合 %s" % fmt_money(combo_tot)
                                if combo_tot else ""))
 
         # 组合注不摊进生肖表，按整注单列。条数多就只列前 5 条 + 省略号
@@ -2842,7 +2842,11 @@ class ManualBetDialog(tk.Toplevel):
             need = 2 if self.zx_mode == "zh2" else 3
             if len(zs) < need:
                 return None, {}, 0.0
-            return zs[:need], {}, round(amt, 2)
+            zs = zs[:need]
+            # 组合注本来就是整注；但用户点「各」时是「每肖各这么多」，
+            # 两个肖各 10 就是 20 元，不能按 10 记。
+            total = round(amt * len(zs), 2) if self.zx_split == "each" else round(amt, 2)
+            return zs, {}, total
         n = len(zs)
         if self.zx_split == "each":
             return zs, {z: amt for z in zs}, round(amt * n, 2)
@@ -2893,6 +2897,10 @@ class ManualBetDialog(tk.Toplevel):
             txt += " → 填金额"
         elif per:
             txt += " → 每肖 %s，共 %s" % (self._amt_str(per[zs[0]]), self._amt_str(total))
+        elif self.zx_split == "each":
+            txt += " → 各 %s × %d 肖 = %s（6 个平特号同时有 %s）" % (
+                self._amt_str(self._read_amt()), len(zs), self._amt_str(total),
+                "、".join(zs))
         else:
             txt += " → 整注 %s（6 个平特号同时有 %s）" % (
                 self._amt_str(total), "、".join(zs))
@@ -2931,6 +2939,8 @@ class ManualBetDialog(tk.Toplevel):
             vals = [round(per[z], 2) for z in zs]
             each_txt = ("每肖 %s" % self._amt_str(vals[0]) if len(set(vals)) == 1
                         else "分摊 " + "/".join(self._amt_str(per[z]) for z in zs))
+        elif self.zx_split == "each" and self.zx_mode in ("zh2", "zh3"):
+            each_txt = "各%s ×%d" % (self._amt_str(self._read_amt()), len(zs))
         else:
             each_txt = "整注"
         self.notes.append({
