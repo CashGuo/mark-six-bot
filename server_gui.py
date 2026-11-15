@@ -1551,7 +1551,7 @@ class MainWindow:
         self.lb_hk.configure(text=fmt_money((banks.get("HK") or {}).get("total") or 0))
         self.lb_issue.configure(text="%s 期" % s.get("issue", "—"))
         self.lb_zyear.configure(text="%s年 · %s" % (s["zodiac_year"], s["zodiac"]))
-        self.lb_kbets.configure(text=str(s["numbers_with_bets"]))
+        self.lb_kbets.configure(text=str(s.get("numbers_with_bets_all", s["numbers_with_bets"])))
         self.lb_flat.configure(text=fmt_money(s.get("flat_total") or 0))
         self.lb_krec.configure(text=str(s.get("records_current") or 0))
         cur_issue = str(s.get("issue") or "")

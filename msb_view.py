@@ -642,6 +642,10 @@ def summary(account: str = "", market: str = "MO") -> dict:
         "grand_total": banks["ALL"]["total"],
         "flat_total": flat,
         "numbers_with_bets": sum(1 for v in data.values() if v > 0),
+        # 总览里澳门、香港两个盘是并排看的，有注号码也该按两盘并起来数（同号只算一个），
+        # 否则香港盘明明有注、顶栏却显示 0
+        "numbers_with_bets_all": len({k for k, v in dm.items() if v > 0}
+                                     | {k for k, v in dh.items() if v > 0}),
         "records_today": rec,
         "records_current": current_bet_count(account),
         "unparsed_today": unp,
