@@ -727,16 +727,19 @@ class MainWindow:
             tv.tag_configure("hot", foreground=CLR_RED)
             self.tv_risk[mk] = tv
 
-    def _render_grid(self, market, rows, total=0.0):
+    def _render_grid(self, market, rows):
         """12 个生肖各一行：左边生肖名，右边一格格「号码 + 金额」。
 
         整盘是销毁重建的（Tk 做不了局部刷新），所以先比数值指纹：一模一样的
         数据直接返回，否则每 5 秒刷一次就是满屏闪烁。
         """
+        # 本盘合计只加盘面上这些号的钱。整盘总额里还有平特 / 连肖 / 组合注
+        # （那些不进 49 号盘），并进来的话盘面明明全空、合计却有钱，对不上。
+        total = round(sum(float(c["amount"] or 0) for r in rows for c in r["cells"]), 2)
         sig = (tuple((r["zodiac"],
                       tuple((c["num"], c["amount"], c["color"]) for c in r["cells"]))
                      for r in rows),
-               round(float(total or 0), 2))
+               total)
         if sig == self._grid_sig.get(market):
             return
         self._grid_sig[market] = sig
@@ -764,6 +767,8 @@ class MainWindow:
         # 不会像固定格宽那样右边空一大片。
         ncol = max(len(r["cells"]) for r in rows)
         self._grid_rows[market] = len(rows)
+        # 最后一列（49 号那一格所在列）下半截要放「本盘合计」，那几格就不能再填空白框
+        total_col = ncol >= 3
         holder.grid_columnconfigure(0, weight=0, minsize=52)
         for c in range(ncol):
             holder.grid_columnconfigure(c + 1, weight=1, uniform="cell")
@@ -778,7 +783,7 @@ class MainWindow:
                 if not cell:
                     # 最后一列（49 号所在那一列）从第二行往下整列空着，
                     # 留给「本盘合计」，别用空框占位，否则跟它叠在一起
-                    if total and c + 1 == ncol:
+                    if total_col and c + 1 == ncol:
                         continue
                     tk.Frame(holder, bg=CLR_BG).grid(row=r, column=c + 1, sticky="nsew")
                     continue
@@ -798,15 +803,18 @@ class MainWindow:
                 cells_out.append((num, amt))
         # 本盘合计放进「49 号」那一列：只有马那一行用得到最后这一格，下面十行
         # 整列空着，正好竖着写本盘金额，宽度跟 49 格一样，看着是同一列
-        if total:
+        if ncol >= 3:
             box = tk.Frame(holder, bg=CLR_BG)
             box.grid(row=1, column=ncol, rowspan=max(len(rows) - 1, 1),
                      sticky="nsew", padx=1, pady=1)
-            tk.Label(box, text="本盘合计", font=FONT_S, bg=CLR_BG,
-                     fg=CLR_MUTED).pack(expand=True)
-            tk.Label(box, text=zx_amt(total) or "0",
+            # 两行贴在一起，整体在这块空白里居中 —— 各自 expand 会把中间撑开
+            inner = tk.Frame(box, bg=CLR_BG)
+            inner.pack(expand=True)
+            tk.Label(inner, text="本盘合计", font=FONT_S, bg=CLR_BG,
+                     fg=CLR_MUTED).pack()
+            tk.Label(inner, text=zx_amt(total) or "0",
                      font=("Microsoft YaHei UI", 15, "bold"),
-                     bg=CLR_BG, fg=CLR_RED).pack(expand=True)
+                     bg=CLR_BG, fg=CLR_RED).pack(pady=(1, 0))
         # 画完立刻按当前尺寸定一次字号，再把缩放事件挂上
         holder.bind("<Configure>", lambda _e, mk=market: self._rescale_grid(mk))
         self._rescale_grid(market)
@@ -1617,13 +1625,10 @@ class MainWindow:
         self.lb_kunp.configure(text=str(unp_n))
         self.btn_unp.configure(text="未解析 %d" % unp_n)
 
-        # 两本号码盘同时画，左澳门右香港；各自的金额跟着盘走
+        # 两本号码盘同时画，左澳门右香港；盘内合计由盘面金额自己算
         grids = s.get("grids") or {}
-        banks = s.get("markets") or {}
-        self._render_grid("MO", grids.get("MO") or [],
-                          (banks.get("MO") or {}).get("total") or 0)
-        self._render_grid("HK", grids.get("HK") or [],
-                          (banks.get("HK") or {}).get("total") or 0)
+        self._render_grid("MO", grids.get("MO") or [])
+        self._render_grid("HK", grids.get("HK") or [])
 
         # 生肖金额表 + 组合注：不落号码盘的钱，按生肖摊开看
         try:
