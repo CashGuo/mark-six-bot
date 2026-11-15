@@ -133,6 +133,10 @@ SX_ORDER = "鼠牛虎兔龙蛇马羊猴鸡狗猪"
 # 不枚举具体词，只要「一二两三四五六(或 1-6) 中 一二两三四五六(或 1-6)」就认。
 _ZHONG_WORDS = r"(?:[一二两三四五六1-6]\s*中\s*[一二两三四五六1-6])"
 
+# 12/13/14 的玩法词：这些整笔玩法后面跟的数字就是钱，不可能是号码，
+# 所以「平特鼠牛各100 鼠牛二中二100」能干净地拆成两注（不然会被并成一注）
+_FLAT_WORD = re.compile(r"(平特|平码|平肖|连肖|%s)" % _ZHONG_WORDS)
+
 # 港澳标记
 HK_MARKS = ("香", "港", "巷")
 MO_MARKS = ("奥", "澳", "门")
@@ -538,6 +542,10 @@ def _looks_priced(seg: str, sx_chars: str) -> bool:
     """
     if _HAS_PRICE.search(seg):
         return True
+    # 12/13/14 整笔玩法：末尾那个数一定是钱（"鼠牛二中二100" 的 100 不是 100 号），
+    # 所以它自己就是完整一项，别并进前一笔
+    if _FLAT_WORD.search(seg) and re.search(r"\d", seg):
+        return True
     return bool(_tail_amount(seg))
 
 
@@ -579,7 +587,17 @@ def split_items(text: str, sx_chars: str) -> List[str]:
         seg = seg.strip()
         if not seg:
             continue
-        if buf and _subject_amount(buf, sx_chars) and _is_subject_head(seg, sx_chars):
+        # 12/13/14 的整笔玩法自带金额（平特鼠50 / 鼠牛二中二100），出现就是新一注的开头，
+        # 不能并进上一笔 —— 否则「平特鼠 50 平特牛 60」会合成一笔 50，牛那 60 直接丢
+        if _FLAT_WORD.search(seg):
+            if buf:
+                out.append(buf)
+            buf = seg
+            continue
+        if buf and _is_subject_head(seg, sx_chars) and (
+                _subject_amount(buf, sx_chars)
+                # 上一笔是 12/13/14 整笔玩法且已有金额（"平特鼠 100"），后面又起生肖 → 新一注
+                or (_FLAT_WORD.search(buf) and re.search(r"\d", buf))):
             out.append(buf)
             buf = seg
             continue
@@ -589,8 +607,8 @@ def split_items(text: str, sx_chars: str) -> List[str]:
         else:
             buf = (buf + " " + seg).strip()
     if buf:
-        if out and _subject_amount(buf, sx_chars):
-            out.append(buf)            # "鼠 50 牛 30" 的最后一段
+        if _FLAT_WORD.search(buf) or (out and _subject_amount(buf, sx_chars)):
+            out.append(buf)            # 12/13/14 的最后一笔 / "鼠 50 牛 30" 的最后一段
         elif out:
             out[-1] += " " + buf
         else:
@@ -681,6 +699,9 @@ def parse_item(raw: str, zodiac: Dict[str, List[str]], sx_chars: str) -> Optiona
     extra, leftover = _take_numbers(rest)
     if leftover.strip():
         return None                          # 还有认不出的碎片，整项交模型
+    if extra and flat:
+        # 平特/连肖/中M 里又冒出一个号码（"平特鼠 07 100"）：07 是号还是钱说不清
+        return None
     if extra:
         nums |= extra
         # 不再往描述里塞 "N个号"：回复文案会把号码逐个列出来，写个数是多余的
@@ -714,6 +735,17 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
                 "detail": "", "market": "MO"}
 
     t = normalize(raw)
+
+    # 12/13/14 的三个手打习惯，不先归一化整条就解析不了：
+    #   "平特 鼠 100" / "平肖 鼠牛虎 各30" / "3连肖 鼠 100"  —— 玩法词与生肖之间有空格
+    #   "平特各鼠牛100"                                        —— 「各」插在玩法词和生肖中间
+    _sx = "".join(zodiac.keys())
+    # 生肖这里要用「鼠|牛|…」的或分支，不能用连写的字符序列（否则只认整串十二肖）
+    _sx_alt = "|".join(re.escape(k) for k in zodiac)
+    t = re.sub(r"(平特|平码|平肖|连肖)\s+(?=[%s])" % _sx, r"\1", t)
+    t = re.sub(r"(平特|平码|平肖|连肖|%s)\s*各\s*((?:%s)+)"
+               % (_ZHONG_WORDS, _sx_alt), r"\1\2各", t)
+
     if _UNSUPPORTED.search(t):
         # fatal：12/13/14 只有占位、没有实现，送模型也只会瞎猜 —— 直接判死
         return {"ok": False, "fatal": True,
@@ -763,7 +795,10 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
             #   鼠牛二中二100           → 整注 100
             txt = seg.strip()
             zs = [ch for ch in txt if ch in zodiac]
-            each = bool(re.search(r"各\s*\d", txt))
+            # 同一个肖写了两遍（"平特鼠鼠100"）只能算一次，否则带「各」时金额会翻倍
+            zs = [ch for i, ch in enumerate(zs) if ch not in zs[:i]]
+            # 带「各」＝每肖各这么多（两肖各 10 = 20）；中文金额也算（"各一百"）
+            each = bool(re.search(r"各\s*(?:\d|[零一二两三四五六七八九十百千万])", txt))
             if re.search(r"连肖", txt):
                 kind = "lianxiao"
                 n = 2                       # 只写「连肖」不写位数，按二连
@@ -773,7 +808,7 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
                 if zs and len(zs) < n:
                     i = SX_ORDER.index(zs[0]) if zs[0] in SX_ORDER else 0
                     zs = [SX_ORDER[(i + k) % 12] for k in range(n)]
-            elif re.search(r"中二|中三", txt):
+            elif re.search(_ZHONG_WORDS, txt):
                 kind = "zhong"
             else:
                 kind = "pingte"
