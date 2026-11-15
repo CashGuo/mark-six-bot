@@ -154,7 +154,7 @@ td.wxid{color:#8a929e;font-size:11.5px;word-break:break-all;max-width:280px}
   </div>
 
   <div class="panel" style="margin-top:10px">
-    <div class="ph">组合注（中二～中六） <span>整注，不摊到单肖 · 港澳合并</span></div>
+    <div class="ph">组合注 <span>整注，不摊到单肖 · 港澳合并 · 同类合并</span></div>
     <div id="zxbCombo"></div>
   </div>
 
@@ -260,14 +260,17 @@ function renderZxBoard(id, b){
 }
 
 /* 组合注：一行一种玩法，同类同生肖合并，港澳合并；有注才出现 */
-const ZHONG_CLR = {二:'#1f6feb', 三:'#7c3aed', 四:'#c2410c', 五:'#c0392b', 六:'#0f766e'};
+/* 颜色按完整玩法名；首字兜底，认不出的玩法回蓝色 —— 以后加别的组合不用改这里 */
+const ZHONG_CLR = {'二中二':'#1f6feb', '三中二':'#0e7490', '三中三':'#7c3aed',
+                   '四中四':'#c2410c', '五中五':'#c0392b', '六中六':'#0f766e'};
+const ZHONG_CLR_HEAD = {二:'#1f6feb', 三:'#7c3aed', 四:'#c2410c', 五:'#c0392b', 六:'#0f766e'};
 const ZHONG_RANK = {二:2, 三:3, 四:4, 五:5, 六:6};
 const ZS_ORDER = '鼠牛虎兔龙蛇马羊猴鸡狗猪'.split('');
 
 function renderCombo(list){
   const el = document.getElementById('zxbCombo');
   if (!list || !list.length){
-    el.innerHTML = '<div class="empty">本期还没有组合注（中二～中六）</div>';
+    el.innerHTML = '<div class="empty">本期还没有组合注</div>';
     return;
   }
   // 同 label + 同生肖组合的合成一笔
@@ -291,7 +294,7 @@ function renderCombo(list){
   let total = 0;
   el.innerHTML = rows.map(function (g) {
     total += g.amount;
-    const clr = ZHONG_CLR[g.label[0]] || 'var(--blue)';
+    const clr = ZHONG_CLR[g.label] || ZHONG_CLR_HEAD[g.label[0]] || 'var(--blue)';
     return `<div class="cbox">
       <span class="clb" style="color:${clr}">${esc(g.label)} ：</span>
       <span class="czs">${esc(g.zodiacs.join('+'))}</span>

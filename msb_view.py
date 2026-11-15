@@ -237,16 +237,22 @@ def market_totals(account: str = "") -> dict:
     return out
 
 
-# ---------------- 生肖注（平特 / 连肖 / 二中二 / 三中三） ----------------
+# ---------------- 生肖注（平特 / 连肖 / 组合注 N 中 M） ----------------
 _CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6}
 
-_ZHONG_RE = re.compile(r"([一二两三四五六])\s*中\s*([一二两三四五六])")
+# 组合注是「N 中 M」，不止二中二～六中六：三中二、四中二、五中三……都要认
+_ZHONG_RE = re.compile(r"([一二两三四五六1-6])\s*中\s*([一二两三四五六1-6])")
+_NUM_CN = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "两": "二"}
 
 
 def zhong_label(text: str = "") -> str:
-    """从「蛇马二中二10」这类原文里取出玩法名：二中二 / 三中三 / 四中四 / 五中五 / 六中六。"""
+    """从「蛇马二中二10」这类原文里取出玩法名，如 二中二 / 三中二 / 四中四。
+    阿拉伯数字写法（3中3）也归一成中文。"""
     m = _ZHONG_RE.search(str(text or ""))
-    return (m.group(1) + "中" + m.group(2)) if m else "二中二"
+    if not m:
+        return "二中二"
+    a, b = (_NUM_CN.get(x, x) for x in (m.group(1), m.group(2)))
+    return a + "中" + b
 
 
 def others_items(account: str = "", market: str = "MO") -> list:

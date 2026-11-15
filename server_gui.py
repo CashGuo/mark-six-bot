@@ -70,9 +70,16 @@ CLR_MUTED = "#6b7280"
 CLR_BLUE = "#1f6feb"
 CLR_RED = "#c0392b"
 CLR_BLUE2 = "#2b6cb0"
-# 组合注按玩法上色，一眼分清是二中二还是六中六
-ZHONG_CLR = {"二": "#1f6feb", "三": "#7c3aed", "四": "#c2410c",
-             "五": "#c0392b", "六": "#0f766e"}
+# 组合注按玩法上色，一眼分清是二中二还是六中六（首字兜底，认不出的回蓝色）
+ZHONG_CLR = {"二中二": "#1f6feb", "三中二": "#0e7490", "三中三": "#7c3aed",
+             "四中四": "#c2410c", "五中五": "#c0392b", "六中六": "#0f766e"}
+ZHONG_CLR_HEAD = {"二": "#1f6feb", "三": "#7c3aed", "四": "#c2410c",
+                  "五": "#c0392b", "六": "#0f766e"}
+
+
+def zhong_color(label) -> str:
+    lb = str(label or "")
+    return ZHONG_CLR.get(lb) or ZHONG_CLR_HEAD.get(lb[:1]) or CLR_BLUE
 # 中二要 2 个肖，中三 3 个……中六 6 个
 ZH_NEED = {"zh2": 2, "zh3": 3, "zh4": 4, "zh5": 5, "zh6": 6}
 ZH_NAME = {"zh2": "二中二", "zh3": "三中三", "zh4": "四中四",
@@ -562,10 +569,10 @@ class MainWindow:
             holder.pack(fill="both", expand=True, padx=5, pady=5)
             self.grid_holder[mk] = holder
 
-        # 中段：生肖金额（平特 + 连肖合并成一列）+ 组合注（二中二/三中三）。
+        # 中段：生肖金额（平特 + 连肖合并成一列）+ 组合注（二中二、三中二、三中三…）。
         # 这两类钱不落 49 号盘，之前只能在「不计号」那个总数里看到一个合计。
         zbp = tk.LabelFrame(left,
-                            text=" 生肖金额（平特 + 连肖合并一列）· 组合注（中二～中六 · 港澳合并） ",
+                            text=" 生肖金额（平特 + 连肖合并一列）· 组合注（整注 · 港澳合并 · 同类合并） ",
                             font=("Microsoft YaHei UI", 12, "bold"), bg=CLR_BG,
                             fg="#111827", bd=1, relief="groove")
         zbp.place(x=0, rely=0.25, relwidth=1.0, relheight=0.33)
@@ -798,7 +805,7 @@ class MainWindow:
         self.combo_box.grid_columnconfigure(1, weight=1)
         for i, g in enumerate(rows):
             tk.Label(self.combo_box, text=g["label"], bg=CLR_BG, anchor="w",
-                     fg=ZHONG_CLR.get(g["label"][0], CLR_BLUE),
+                     fg=zhong_color(g["label"]),
                      font=("Microsoft YaHei UI", 10, "bold")
                      ).grid(row=i, column=0, sticky="w", pady=0)
             tk.Label(self.combo_box, text="+".join(g["zodiacs"]) or "—", bg=CLR_BG,
@@ -2606,10 +2613,10 @@ class ManualBetDialog(tk.Toplevel):
             for c in range(cols):
                 gf.grid_columnconfigure(c, weight=1)
 
-        # ---- 生肖注：平特 / 连肖 / 二中二 / 三中三 ----
+        # ---- 生肖注：平特 / 连肖 / 组合注 ----
         # 先做界面。记账功能等口径确认后再接，现在加入清单只做核对。
         tk.Frame(self.ops, bg=CLR_LINE, height=1).pack(fill="x", padx=12, pady=(12, 0))
-        self._lbl(self.ops, "生肖注（平特 / 连肖 / 二中二 / 三中三）", "small",
+        self._lbl(self.ops, "生肖注（平特 / 连肖 / 组合注）", "small",
                   bg=CLR_CARD, fg=CLR_MUTED
                   ).pack(anchor="w", padx=12, pady=(8, 0))
         self._lbl(self.ops, "整肖的钱不摊进上面的号码盘", "tiny",
