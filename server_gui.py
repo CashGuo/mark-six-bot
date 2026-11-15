@@ -534,30 +534,41 @@ class MainWindow:
                                  bg=CLR_CARD, fg=CLR_RED)
         self.lb_grand.pack(side="left", padx=(6, 18))
 
-        def chip(label, attr):
+        def chip(label, attr, pack=True, click=None):
+            """一个小标签：灰字标题 + 粗体数值。
+
+            pack=False 时只创建不上屏 —— 数值还在刷新，只是不再占顶栏位置。
+            click 给了就变成可点的链接样式（下划线太挤，用蓝字 + 手型光标）。
+            """
             w = tk.Frame(row, bg=CLR_CARD)
-            w.pack(side="left", padx=(0, 16))
+            if pack:
+                w.pack(side="left", padx=(0, 16))
             tk.Label(w, text=label, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED).pack(side="left")
             lb = tk.Label(w, text="—", font=FONT_B, bg=CLR_CARD, fg="#111827")
             lb.pack(side="left", padx=(4, 0))
+            if click is not None:
+                lb.configure(fg=CLR_BLUE, cursor="hand2")
+                lb.bind("<Button-1>", lambda _e: click())
             setattr(self, attr, lb)
 
         chip("本期", "lb_issue")
         chip("生肖年", "lb_zyear")
-        # 香港、澳门两本账分开算，各露一个数
-        chip("澳门", "lb_mo")
-        chip("香港", "lb_hk")
-        chip("有注号码", "lb_kbets")
+        # 澳门、香港各自的金额钉到各号码盘最后一列底部去了，顶栏只留一个合计
+        chip("澳门", "lb_mo", pack=False)
+        chip("香港", "lb_hk", pack=False)
+        chip("有注号码", "lb_kbets", pack=False)
+        chip("号码盘", "lb_desk")
         # 平特整肖、二中二这类只记总额、不进号码盘，单独露一个数
         chip("平特", "lb_flat")
         chip("本期已记账", "lb_krec")
-        # 未解析只统计本期：上几期没解析的单已经随期归档，不该混进来
-        chip("本期未解析", "lb_kunp")
+        # 未解析只统计本期：上几期没解析的单已经随期归档，不该混进来。
+        # 点这个数字直接跳到「消息」那边看是哪几条，不再单放一个按钮
+        chip("本期未解析", "lb_kunp", click=self.goto_unparsed)
 
+        # 按钮留着（别处可能还要它显示数字），只是不占顶栏那一行
         self.btn_unp = tk.Button(row, text="未解析 0", font=FONT_S, bg="#fdf4f3",
                                  fg=CLR_RED, relief="flat", bd=0, cursor="hand2",
                                  command=self.show_unparsed)
-        self.btn_unp.pack(side="left", padx=(4, 0))
 
         tk.Label(row, text="账号", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
                  ).pack(side="right", padx=(6, 4))
@@ -716,15 +727,16 @@ class MainWindow:
             tv.tag_configure("hot", foreground=CLR_RED)
             self.tv_risk[mk] = tv
 
-    def _render_grid(self, market, rows):
+    def _render_grid(self, market, rows, total=0.0):
         """12 个生肖各一行：左边生肖名，右边一格格「号码 + 金额」。
 
         整盘是销毁重建的（Tk 做不了局部刷新），所以先比数值指纹：一模一样的
         数据直接返回，否则每 5 秒刷一次就是满屏闪烁。
         """
-        sig = tuple((r["zodiac"],
-                     tuple((c["num"], c["amount"], c["color"]) for c in r["cells"]))
-                    for r in rows)
+        sig = (tuple((r["zodiac"],
+                      tuple((c["num"], c["amount"], c["color"]) for c in r["cells"]))
+                     for r in rows),
+               round(float(total or 0), 2))
         if sig == self._grid_sig.get(market):
             return
         self._grid_sig[market] = sig
@@ -780,6 +792,17 @@ class MainWindow:
                                font=FONT_AMT, bg="#fafbfc", fg="#111827", anchor="w")
                 amt.pack(side="left")
                 cells_out.append((num, amt))
+        # 本盘合计钉在最后一列的下半截：只有「马」那一行用得到最后一格（49 号），
+        # 下面十来行都空着，正好把澳门 / 香港各自的金额放在那儿，不用挤顶栏
+        if total:
+            box = tk.Frame(holder, bg=CLR_BG)
+            box.grid(row=max(len(rows) - 2, 1), column=ncol + 1, rowspan=2,
+                     sticky="nsew", padx=2, pady=2)
+            tk.Label(box, text="本盘合计", font=FONT_S, bg=CLR_BG,
+                     fg=CLR_MUTED).pack()
+            tk.Label(box, text=fmt_money(total),
+                     font=("Microsoft YaHei UI", 15, "bold"),
+                     bg=CLR_BG, fg=CLR_RED).pack()
         # 画完立刻按当前尺寸定一次字号，再把缩放事件挂上
         holder.bind("<Configure>", lambda _e, mk=market: self._rescale_grid(mk))
         self._rescale_grid(market)
@@ -1552,6 +1575,8 @@ class MainWindow:
         self.lb_issue.configure(text="%s 期" % s.get("issue", "—"))
         self.lb_zyear.configure(text="%s年 · %s" % (s["zodiac_year"], s["zodiac"]))
         self.lb_kbets.configure(text=str(s.get("numbers_with_bets_all", s["numbers_with_bets"])))
+        # 顶栏只剩一个「号码盘 = 澳 + 港」，两本各自的金额在盘面右下角
+        self.lb_desk.configure(text=fmt_money(s.get("grand_total") or 0))
         self.lb_flat.configure(text=fmt_money(s.get("flat_total") or 0))
         self.lb_krec.configure(text=str(s.get("records_current") or 0))
         cur_issue = str(s.get("issue") or "")
@@ -1588,10 +1613,13 @@ class MainWindow:
         self.lb_kunp.configure(text=str(unp_n))
         self.btn_unp.configure(text="未解析 %d" % unp_n)
 
-        # 两本号码盘同时画，左澳门右香港
+        # 两本号码盘同时画，左澳门右香港；各自的金额跟着盘走
         grids = s.get("grids") or {}
-        self._render_grid("MO", grids.get("MO") or [])
-        self._render_grid("HK", grids.get("HK") or [])
+        banks = s.get("markets") or {}
+        self._render_grid("MO", grids.get("MO") or [],
+                          (banks.get("MO") or {}).get("total") or 0)
+        self._render_grid("HK", grids.get("HK") or [],
+                          (banks.get("HK") or {}).get("total") or 0)
 
         # 生肖金额表 + 组合注：不落号码盘的钱，按生肖摊开看
         try:
@@ -1762,6 +1790,20 @@ class MainWindow:
             pass
 
     # ---- 动作 ----
+    def goto_unparsed(self):
+        """点顶栏「本期未解析」：跳到消息页看原始消息，未解析的那几条标红。
+
+        顶栏不再单放一个「未解析」按钮，点数字就跳过去，省一行位置。
+        """
+        try:
+            self.nb.select(self.tab_log)
+        except Exception:
+            return
+        try:
+            self.refresh_log(force=True)
+        except Exception:
+            pass
+
     def show_unparsed(self):
         # 和「消息」页、顶部数字同一个来源：消息流水里 result=未解析 的那些，
         # 再按当前选中的账期过滤，三处数就一致了。
