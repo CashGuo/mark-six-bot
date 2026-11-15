@@ -3217,7 +3217,14 @@ def clear_account_dir(account: str) -> dict:
     except Exception as e:
         logger.warning(f"[{acc}] 删 issues/ 失败：{e}")
 
+    # 两个盘、两类账都要归零：
+    # numbers_state 是澳门号码盘，numbers_state_hk 是香港号码盘；
+    # others_state(_hk) 是平特/连肖/组合注这类整笔注。少清哪个，看板就会
+    # 在「已清空」之后仍显示旧的金额（实测清完还挂着 200）。
     save_data(init_data(), acc)
+    save_data(init_data(), acc, "HK")
+    save_others({"total": 0.0, "items": []}, acc)
+    save_others({"total": 0.0, "items": []}, acc, "HK")
     logger.info(f"清空账本：[{acc}] 删了 {len(removed)} 项，留底 {backup_dir or '无'}")
     return {"account": acc, "backup": backup_dir, "removed": removed}
 

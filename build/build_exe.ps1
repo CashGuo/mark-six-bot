@@ -41,6 +41,10 @@ $nuitkaArgs = @(
     "--include-package=httpcore2",
     "--python-flag=-O",
     "--nofollow-import-to=pytest,tests,unittest",
+    # 这台机器 15.7G 内存、打包时可用 4G 左右，Nuitka 默认用 zstd level 22
+    # 多线程压 121MB 的 dist，实测直接 "Allocation error : not enough memory"
+    # 打包失败。--low-memory 会把压缩级别降到 3、单线程，包大一点但一定能出。
+    "--low-memory",
     "--company-name=MarkSixBot",
     "--product-name=MarkSixBot server",
     "--file-version=1.0.0.0",

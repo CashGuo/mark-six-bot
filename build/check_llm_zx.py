@@ -215,6 +215,8 @@ def main():
                  "模型/提示词有改动就重跑一次即可复核。")
 
 
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("报告：%s" % out)
     return 0
