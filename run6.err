@@ -1,0 +1,139 @@
+2026-11-12 16:16:22,557 - INFO - 🚀 六合彩记账（微信推送版）启动中...
+2026-11-12 16:16:22,559 - INFO - 当前农历年份：2026年马年
+2026-11-12 16:16:22,624 - INFO - WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8899
+ * Running on http://192.168.1.47:8899
+2026-11-12 16:16:22,626 - INFO - Press CTRL+C to quit
+2026-11-12 16:16:40,239 - INFO - 当前农历年份：2026年马年
+2026-11-12 16:16:40,240 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:16:40,267 - INFO - 收到推送 batch=1794471400-mul-a-1 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_a
+2026-11-12 16:16:40,267 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:16:40,284 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:16:40,312 - INFO - 收到推送 batch=1794471400-mul-b-1 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_b
+2026-11-12 16:16:40,313 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:16:40,319 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:16:40,344 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:16:40,351 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:16:40,375 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:16:40,382 - INFO - 收到推送 batch=1794471400-mul-a-fp1 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_a
+2026-11-12 16:16:40,383 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:16:40,389 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:16:40,392 - INFO - 收到推送 batch=1794471400-mul-b-fp 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_b
+2026-11-12 16:16:40,392 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:16:40,401 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:16:40,407 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/dashboard?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:16:40,411 - INFO - 收到推送 batch=1794471400-mul-a-fp1 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_a
+2026-11-12 16:16:40,412 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:16:40,420 - INFO - 监听配置已更新：[t_a] 1 项，version=1
+2026-11-12 16:16:40,422 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "POST /api/targets HTTP/1.1" 200 -
+2026-11-12 16:16:40,428 - INFO - 监听配置已更新：[t_b] 1 项，version=1
+2026-11-12 16:16:40,429 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "POST /api/targets HTTP/1.1" 200 -
+2026-11-12 16:16:40,435 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /wx/targets?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:16:40,443 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /wx/targets?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:16:40,448 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /wx/targets HTTP/1.1" 200 -
+2026-11-12 16:16:40,466 - WARNING - targets 拉取验签失败 ts=1794471400 cust=
+2026-11-12 16:16:40,466 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /wx/targets?account=t_a HTTP/1.1" 401 -
+2026-11-12 16:16:40,475 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "GET /api/accounts HTTP/1.1" 200 -
+2026-11-12 16:16:40,484 - INFO - 监听配置已更新：[guochangjin1] 0 项，version=7
+2026-11-12 16:16:40,485 - INFO - 127.0.0.1 - - [12/Nov/2026 16:16:40] "POST /api/targets HTTP/1.1" 200 -
+2026-11-12 16:17:19,043 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:19] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:17:20,089 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:17:20,094 - INFO - AI返回：{"items":[{"type":"zodiac","names":["马"],"amount":10}]}
+2026-11-12 16:17:20,094 - INFO - 展开结果：5 个号码，共 $50.00
+2026-11-12 16:17:20,099 - INFO - 记账成功：[t_a] 测试群 $50.00，5个号码，累计 $50.00
+2026-11-12 16:17:20,103 - INFO - 收到推送 batch=1794471439-mul-a-1-1794471438 共1条 记账1 未解析0 跳过0 cust=C0001 acc=t_a
+2026-11-12 16:17:20,103 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:20] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:17:20,109 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:20] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:17:20,836 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:17:20,838 - INFO - AI返回：{"items":[{"type":"zodiac","names":["马"],"amount":10}]}
+2026-11-12 16:17:20,838 - INFO - 展开结果：5 个号码，共 $50.00
+2026-11-12 16:17:20,845 - INFO - 记账成功：[t_b] 测试群 $50.00，5个号码，累计 $50.00
+2026-11-12 16:17:20,847 - INFO - 收到推送 batch=1794471440-mul-b-1-1794471438 共1条 记账1 未解析0 跳过0 cust=C0001 acc=t_b
+2026-11-12 16:17:20,848 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:20] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:17:20,854 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:20] "GET /api/dashboard?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:17:20,863 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:20] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:17:20,874 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:20] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:17:20,884 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:20] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:17:21,659 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:17:21,659 - INFO - AI返回：{"items":[{"type":"zodiac","names":["鼠"],"amount":10}]}
+2026-11-12 16:17:21,660 - INFO - 展开结果：4 个号码，共 $40.00
+2026-11-12 16:17:21,666 - INFO - 记账成功：[t_a] 测试群 $40.00，4个号码，累计 $90.00
+2026-11-12 16:17:21,668 - INFO - 收到推送 batch=1794471440-mul-a-fp1-1794471438 共1条 记账1 未解析0 跳过0 cust=C0001 acc=t_a
+2026-11-12 16:17:21,669 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:17:21,677 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:17:21,685 - INFO - [跨账号重复] t_b 鼠各号10米
+2026-11-12 16:17:21,685 - INFO - 收到推送 batch=1794471441-mul-b-fp-1794471438 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_b
+2026-11-12 16:17:21,685 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:17:21,693 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:17:21,702 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "GET /api/dashboard?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:17:21,708 - INFO - 收到推送 batch=1794471441-mul-a-fp1-1794471438 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_a
+2026-11-12 16:17:21,708 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:17:21,717 - INFO - 监听配置已更新：[t_a] 1 项，version=1
+2026-11-12 16:17:21,718 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "POST /api/targets HTTP/1.1" 200 -
+2026-11-12 16:17:21,727 - INFO - 监听配置已更新：[t_b] 1 项，version=1
+2026-11-12 16:17:21,727 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "POST /api/targets HTTP/1.1" 200 -
+2026-11-12 16:17:21,734 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "GET /wx/targets?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:17:21,740 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "GET /wx/targets?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:17:21,747 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "GET /wx/targets HTTP/1.1" 200 -
+2026-11-12 16:17:21,752 - WARNING - targets 拉取验签失败 ts=1794471441 cust=
+2026-11-12 16:17:21,753 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "GET /wx/targets?account=t_a HTTP/1.1" 401 -
+2026-11-12 16:17:21,768 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "GET /api/accounts HTTP/1.1" 200 -
+2026-11-12 16:17:21,783 - INFO - 监听配置已更新：[default] 0 项，version=1
+2026-11-12 16:17:21,783 - INFO - 127.0.0.1 - - [12/Nov/2026 16:17:21] "POST /api/targets HTTP/1.1" 200 -
+2026-11-12 16:18:02,944 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:18:02,945 - INFO - AI返回：{"items":[{"type":"zodiac","names":["马","鼠","鸡"],"amount":15}]}
+2026-11-12 16:18:02,945 - INFO - 展开结果：13 个号码，共 $195.00
+2026-11-12 16:18:02,957 - INFO - 记账成功：[j693300002] 六合彩交流群A $195.00，13个号码，累计 $195.00
+2026-11-12 16:18:02,962 - INFO - 收到推送 batch=1794471481-demo-a1 共1条 记账1 未解析0 跳过0 cust=C0001 acc=j693300002
+2026-11-12 16:18:02,962 - INFO - 127.0.0.1 - - [12/Nov/2026 16:18:02] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:18:03,649 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:18:03,650 - INFO - AI返回：{"items":[{"type":"color_parity","names":["红双","蓝单"],"amount":5}]}
+2026-11-12 16:18:03,650 - INFO - 展开结果：17 个号码，共 $85.00
+2026-11-12 16:18:03,656 - INFO - 记账成功：[j693300002] 六合彩交流群A $85.00，17个号码，累计 $280.00
+2026-11-12 16:18:03,659 - INFO - 收到推送 batch=1794471482-demo-a2 共1条 记账1 未解析0 跳过0 cust=C0001 acc=j693300002
+2026-11-12 16:18:03,660 - INFO - 127.0.0.1 - - [12/Nov/2026 16:18:03] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:18:04,350 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:18:04,351 - INFO - AI返回：{"items":[{"type":"zodiac","names":["蛇"],"amount":20}]}
+2026-11-12 16:18:04,351 - INFO - 展开结果：4 个号码，共 $80.00
+2026-11-12 16:18:04,357 - INFO - 记账成功：[liuyi_8899] 老客户下注群 $80.00，4个号码，累计 $80.00
+2026-11-12 16:18:04,360 - INFO - 收到推送 batch=1794471483-demo-b1 共1条 记账1 未解析0 跳过0 cust=C0001 acc=liuyi_8899
+2026-11-12 16:18:04,360 - INFO - 127.0.0.1 - - [12/Nov/2026 16:18:04] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:18:04,365 - ERROR - Exception on /wx/contacts [POST]
+Traceback (most recent call last):
+  File "D:\Users\Administrator\Python\mark-six-bot\venv\Lib\site-packages\flask\app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Users\Administrator\Python\mark-six-bot\venv\Lib\site-packages\flask\app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Users\Administrator\Python\mark-six-bot\venv\Lib\site-packages\flask\app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Users\Administrator\Python\mark-six-bot\venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Users\Administrator\Python\mark-six-bot\main.py", line 1013, in wx_contacts
+    "generated_at": int(payload.get("generated_at") or 0),
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '2026-11-12 16:18:04'
+2026-11-12 16:18:04,369 - INFO - 127.0.0.1 - - [12/Nov/2026 16:18:04] "POST /wx/contacts HTTP/1.1" 500 -
+2026-11-12 16:18:04,388 - ERROR - Exception on /wx/contacts [POST]
+Traceback (most recent call last):
+  File "D:\Users\Administrator\Python\mark-six-bot\venv\Lib\site-packages\flask\app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Users\Administrator\Python\mark-six-bot\venv\Lib\site-packages\flask\app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Users\Administrator\Python\mark-six-bot\venv\Lib\site-packages\flask\app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Users\Administrator\Python\mark-six-bot\venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Users\Administrator\Python\mark-six-bot\main.py", line 1013, in wx_contacts
+    "generated_at": int(payload.get("generated_at") or 0),
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '2026-11-12 16:18:04'
+2026-11-12 16:18:04,390 - INFO - 127.0.0.1 - - [12/Nov/2026 16:18:04] "POST /wx/contacts HTTP/1.1" 500 -

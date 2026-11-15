@@ -1,0 +1,741 @@
+# -*- coding: utf-8 -*-
+"""下注文本的规则解析器 —— 能算的先用规则算，算不了的再交给大模型。
+
+核心不变式：**金额永远是「单价 × 号码个数」**，号码集合一律由本地号码表给出，
+模型永远不参与算钱。这样即便模型看错玩法，也只错在玩法判断这一层，
+不会把金额算飞。
+
+扩展方式：新增玩法往 PLAYS 里加一条 Play 就行，主流程不动。
+12/13/14（平特/平码/平、连肖、二中二/三中二/三中三）暂不支持，
+命中关键词直接判失败，交给上层标"暂不支持" —— 也不送模型，
+免得它瞎猜给客户记错账。
+"""
+
+import re
+from typing import Dict, List, Optional, Set, Tuple
+
+# ======================== 号码表 ========================
+#
+# 号码统一用两位字符串（"01"…"49"），和账本里的 key 保持一致。
+
+
+def _two(n) -> str:
+    return "%02d" % int(n)
+
+
+TAIL: Dict[str, List[str]] = {
+    str(d): [_two(n) for n in range(1, 50) if n % 10 == d] for d in range(1, 10)
+}
+TAIL["0"] = ["10", "20", "30", "40"]        # 0 尾只有 4 个号
+
+HEAD: Dict[str, List[str]] = {
+    "0": [_two(n) for n in range(1, 10)],
+    "1": [_two(n) for n in range(10, 20)],
+    "2": [_two(n) for n in range(20, 30)],
+    "3": [_two(n) for n in range(30, 40)],
+    "4": [_two(n) for n in range(40, 50)],   # 49 是四字头
+}
+
+COLOR: Dict[str, List[str]] = {
+    "红": ["01", "02", "07", "08", "12", "13", "18", "19", "23", "24",
+           "29", "30", "34", "35", "40", "45", "46"],
+    "蓝": ["03", "04", "09", "10", "14", "15", "20", "25", "26",
+           "31", "36", "37", "41", "42", "47", "48"],
+    "绿": ["05", "06", "11", "16", "17", "21", "22", "27", "28",
+           "32", "33", "38", "39", "43", "44", "49"],
+}
+
+COLOR_PARITY: Dict[str, List[str]] = {
+    "红单": ["01", "07", "13", "19", "23", "29", "35", "45"],
+    "红双": ["02", "08", "12", "18", "24", "30", "34", "40", "46"],
+    "蓝单": ["03", "09", "15", "25", "31", "37", "41", "47"],
+    "蓝双": ["04", "10", "14", "20", "26", "36", "42", "48"],
+    "绿单": ["05", "11", "17", "21", "27", "33", "39", "43", "49"],
+    "绿双": ["06", "16", "22", "28", "32", "38", "44"],
+}
+
+_ODD = [_two(n) for n in range(1, 50) if n % 2]
+_EVEN = [_two(n) for n in range(1, 50) if n % 2 == 0]
+
+SIZE: Dict[str, List[str]] = {
+    "小": [_two(n) for n in range(1, 25)],      # 1–24
+    "大": [_two(n) for n in range(25, 50)],     # 25–49
+}
+
+PARITY: Dict[str, List[str]] = {"单": _ODD, "双": _EVEN}
+
+# 大小 ∩ 单双：小单 12、小双 12、大单 13、大双 12
+SIZE_PARITY: Dict[str, List[str]] = {
+    "小单": [n for n in SIZE["小"] if int(n) % 2],
+    "小双": [n for n in SIZE["小"] if int(n) % 2 == 0],
+    "大单": [n for n in SIZE["大"] if int(n) % 2],
+    "大双": [n for n in SIZE["大"] if int(n) % 2 == 0],
+}
+
+# 波色 ∩ 大小：红小 红大 蓝小 蓝大 绿小 绿大（"红小100" = 红波里的小号，每个 100）
+COLOR_SIZE: Dict[str, List[str]] = {
+    c + s: [n for n in COLOR[c] if n in SIZE[s]]
+    for c in ("红", "蓝", "绿") for s in ("小", "大")
+}
+
+
+def _heshu() -> Dict[str, List[str]]:
+    """合数单双：十位 + 个位之和的奇偶。10 → 1+0=1 单，49 → 4+9=13 单。"""
+    dan, shuang = [], []
+    for n in range(1, 50):
+        t = (n // 10) + (n % 10)
+        (dan if t % 2 else shuang).append(_two(n))
+    return {"单": dan, "双": shuang}
+
+
+HESHU = _heshu()
+
+WUXING: Dict[str, List[str]] = {
+    "金": ["04", "05", "12", "13", "26", "27", "34", "35", "42", "43"],
+    "木": ["08", "09", "16", "17", "24", "25", "38", "39", "46", "47"],
+    "水": ["01", "14", "15", "22", "23", "30", "31", "44", "45"],
+    "火": ["02", "03", "10", "11", "18", "19", "32", "33", "40", "41", "48", "49"],
+    "土": ["06", "07", "20", "21", "28", "29", "36", "37"],
+}
+
+JIAQIN_SX = ["牛", "马", "羊", "鸡", "狗", "猪"]
+YE_SHOU_SX = ["鼠", "虎", "兔", "龙", "蛇", "猴"]
+
+# ======================== 规范化 ========================
+#
+# 错字、单位词、标点都在这层洗掉，后面的扫描只认干净文本。
+
+TYPO: Dict[str, str] = {
+    "洪波": "红波", "红坡": "红波", "宏波": "红波", "鸿波": "红波",
+    "兰波": "蓝波", "蓝坡": "蓝波", "岚波": "蓝波", "澜波": "蓝波",
+    "绿坡": "绿波", "绿博": "绿波", "绿播": "绿波",
+    "野首": "野兽", "夜兽": "野兽", "耶兽": "野兽",
+    "家琴": "家禽", "加禽": "家禽", "佳禽": "家禽",
+    "和数": "合数", "和单": "合单", "和双": "合双",
+    "红波色": "红波", "蓝波色": "蓝波", "绿波色": "绿波",
+}
+
+# 金额单位 / 无意义符号，直接抹掉。
+# "元/块" 留着不抹：它是"这数字是钱"的明确信号，抹了就分不出
+# "小双20元"（每号 20）和 "小双20"（20 可能是号码）。
+_STRIP_CHARS = "米斤两蚊文点包#≈"
+
+# 被拆碎的换行符
+_PUNCT = {"。": ",", "；": ";", "，": ",", "、": ",", "·": "."}
+
+# 12/13/14 关键词：暂不支持，直接判失败
+_UNSUPPORTED = re.compile(r"(中特|特肖)")
+
+# 港澳标记
+HK_MARKS = ("香", "港", "巷")
+MO_MARKS = ("奥", "澳", "门")
+
+
+def normalize(text: str) -> str:
+    t = (text or "").strip()
+    t = t.replace("\n", "").replace("\r", "")
+    for wrong, right in TYPO.items():
+        t = t.replace(wrong, right)
+    # "买鼠50 / 叫鼠50 / 下注鼠50"：格式词写在对象前面，纯噪声，直接去掉
+    for w in ("下注", "买", "叫"):
+        t = t.replace(w, "")
+    for a, b in _PUNCT.items():
+        t = t.replace(a, b)
+    # 复合玩法被空格拆开（"小 单 50" → "小单 50"，"红 波 100" → "红波 100"）：
+    # 拆开会被当成两种独立玩法取并集，17 个号会变成 37 个号，必须合回去。
+    t = re.sub(r"(红|蓝|绿)\s*(单|双|小|大|波)", r"\1\2", t)
+    t = re.sub(r"(小|大)\s*(单|双)", r"\1\2", t)
+    for ch in _STRIP_CHARS:
+        t = t.replace(ch, "")
+    return t
+
+
+def detect_market(t: str) -> str:
+    """香港/澳门分盘：含 香/港/巷 算香港，其余（含没标的）都算澳门。"""
+    for k in HK_MARKS:
+        if k in t:
+            return "HK"
+    return "MO"
+
+
+# ======================== 中文数字 ========================
+
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def cn2num(s: str) -> Optional[float]:
+    """中文/阿拉伯数字转 float。"十五"=15，"两百"=200，"二十五"=25。"""
+    s = (s or "").strip()
+    if not s:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return float(s)
+
+    total = section = num = 0
+    seen = False
+    for ch in s:
+        if ch in _CN_DIGIT:
+            num = _CN_DIGIT[ch]
+            seen = True
+        elif ch == "十":
+            section += (num or 1) * 10
+            num = 0
+            seen = True
+        elif ch == "百":
+            section += (num or 1) * 100
+            num = 0
+            seen = True
+        elif ch == "千":
+            total += (num or 1) * 1000
+            num = 0
+            seen = True
+        elif ch == "万":
+            total += (section + num or 1) * 10000
+            section = num = 0
+            seen = True
+        else:
+            return None
+    if not seen:
+        return None
+    return float(total + section + num)
+
+
+# ======================== 玩法注册表 ========================
+#
+# 每条 Play 只做两件事：认出写法（pattern）、给出覆盖的号码（resolve）。
+# 加新玩法 = 往 PLAYS 追加一条，主流程一行都不用改。
+
+
+class Play:
+    __slots__ = ("key", "name", "pattern", "resolve", "priority", "mode")
+
+    def __init__(self, key: str, name: str, pattern: str, resolve, priority: int,
+                 mode: str = "number"):
+        self.key = key
+        self.name = name
+        self.pattern = re.compile(pattern)
+        self.resolve = resolve          # (match, zodiac) -> List[str]
+        self.priority = priority
+        # number = 单价 × 号码个数，累加进号码盘
+        # flat   = 原文那个数就是整笔金额，不落号码盘（平特整肖、二中二/三中三）
+        self.mode = mode
+
+
+def _r_color_parity(m, zodiac):
+    return COLOR_PARITY.get(m.group(1) + m.group(2), [])
+
+
+def _r_color_size(m, zodiac):
+    """红小 / 红大 / 蓝小…：波色 ∩ 大小，两个条件都要满足（交集）。"""
+    return COLOR_SIZE.get(m.group(1) + m.group(2), [])
+
+
+def _r_size_color(m, zodiac):
+    """小红 / 大蓝…：大小在前，同样是交集。"""
+    return COLOR_SIZE.get(m.group(2) + m.group(1), [])
+
+
+def _r_size_parity(m, zodiac):
+    return SIZE_PARITY.get(m.group(1) + m.group(2), [])
+
+
+def _r_heshu(m, zodiac):
+    return HESHU.get(m.group(1), [])
+
+
+def _r_wuxing(m, zodiac):
+    """金 / 金木 / 金木水火土：连写的几个五行取并集。"""
+    out: List[str] = []
+    for ch in m.group(1) or "":
+        out.extend(WUXING.get(ch, []))
+    return out
+
+
+def _r_jiaqin(m, zodiac):
+    word = m.group(1)
+    sxs = JIAQIN_SX if "禽" in word or "畜" in word else YE_SHOU_SX
+    out: List[str] = []
+    for sx in sxs:
+        out.extend(zodiac.get(sx, []))
+    return out
+
+
+def _sx_union(text: str, zodiac: Dict[str, List[str]]) -> List[str]:
+    """一串生肖字（"鼠牛虎"）→ 它们名下号码的并集，"鼠鼠" 自动去重。"""
+    out: List[str] = []
+    for ch in text or "":
+        out.extend(zodiac.get(ch, []))
+    return out
+
+
+def _r_pingte(m, zodiac):
+    """12 平特/平码/平：整肖。钱按整肖一共多少算，不摊到号码上。"""
+    return _sx_union(m.group(1), zodiac)
+
+
+def _r_lianxiao(m, zodiac):
+    """13 连肖：这几个肖的号码并集，每个号各记单价。"""
+    return _sx_union(m.group(2), zodiac)
+
+
+def _r_zhong(m, zodiac):
+    """14 二中二/三中二/三中三：号码只用来回显，钱按原文那个数算总额。"""
+    out: List[str] = []
+    for tok in re.findall(r"\d+", m.group(2) or ""):
+        v = int(tok)
+        if 1 <= v <= 49:
+            out.append(_two(v))
+    return out
+
+
+def _r_color(m, zodiac):
+    return COLOR.get(m.group(1), [])
+
+
+def _r_tail(m, zodiac):
+    """5尾 / 尾数5 / 567尾 —— 连续尾数自动展开成 5尾+6尾+7尾 的并集。"""
+    digits = (m.group(1) or "") + (m.group(2) or "")
+    out: List[str] = []
+    for ch in digits:
+        out.extend(TAIL.get(ch, []))
+    return out
+
+
+def _r_head(m, zodiac):
+    return HEAD.get(m.group(1), [])
+
+
+def _r_size(m, zodiac):
+    return SIZE.get(m.group(1), [])
+
+
+def _r_parity(m, zodiac):
+    return PARITY.get(m.group(1), [])
+
+
+def _r_zodiac(m, zodiac):
+    return zodiac.get(m.group(1), [])
+
+
+def _r_age(m, zodiac):
+    """岁数：1 岁 = 当年生肖，号码正好是 01、13、25、37、49。
+
+    n 岁的号码就是 n、n+12、n+24、n+36、n+48（12 年一轮），
+    所以这里不用生肖表 —— 岁数本身已经决定了号码，跨年也自动对。
+    """
+    def nums_for(n):
+        k = (n - 1) % 12 + 1
+        return [_two(x) for x in range(k, 50, 12)]
+
+    a = int(m.group(1))
+    b = m.group(2)
+    if b:
+        lo, hi = sorted((a, int(b)))
+        out: List[str] = []
+        for n in range(lo, hi + 1):
+            for x in nums_for(n):
+                if x not in out:
+                    out.append(x)
+        return out
+    return nums_for(a)
+
+
+PLAYS: List[Play] = sorted([
+    # 优先级高的先匹配：复合玩法必须先于它的组成部分被吃掉，
+    # 否则 "红单" 会被 "红" 抢走、只算成红波 17 个号。
+    # 14 二中二/三中二/三中三：只记总额，号码只用来回显
+    Play("zhong", "中二/中三", r"(二中二|三中二|三中三)((?:\s*\d+)*)", _r_zhong, 93,
+         mode="flat"),
+    Play("color_parity", "波色单双", r"(红|蓝|绿)(单|双)", _r_color_parity, 90),
+    Play("color_size", "波色大小", r"(红|蓝|绿)(小|大)", _r_color_size, 88),
+    Play("size_color", "大小波色", r"(小|大)(红|蓝|绿)", _r_size_color, 88),
+    Play("size_parity", "大小单双", r"(小|大)(单|双)", _r_size_parity, 85),
+    Play("heshu", "合数单双", r"合[数码]?(单|双)", _r_heshu, 80),
+    Play("wuxing", "五行", r"((?:金|木|水|火|土)+)(?![肖])", _r_wuxing, 75),
+    Play("jiaqin", "家禽野兽", r"(家禽|家畜|野兽)", _r_jiaqin, 70),
+    Play("color", "波色", r"(红|蓝|绿)\s*(?:波色|波)?", _r_color, 65),
+    Play("tail", "尾数", r"(?:尾数\s*(\d+)|(\d+)\s*尾)", _r_tail, 60),
+    Play("age", "岁数", r"(?:岁数\s*)?(\d+)\s*岁(?:\s*[-~到至]\s*(\d+)\s*岁)?",
+         _r_age, 58),
+    Play("head", "头数", r"(\d)\s*头", _r_head, 55),
+    Play("size", "大小", r"(小|大)(?![单双])", _r_size, 50),
+    Play("parity", "单双", r"(单|双)(?![单双])", _r_parity, 45),
+], key=lambda p: -p.priority)
+
+
+def _zodiac_plays(zodiac: Dict[str, List[str]]) -> List[Play]:
+    """生肖是每年的表，得动态生成；优先级最低，别抢走别的玩法。
+
+    12/13 也要生肖表，所以一起在这儿建：
+      平特鼠100   整肖共 100，不落号码盘
+      二连肖鼠牛各20  鼠+牛 9 个号各 20，落号码盘
+    """
+    sxs = "|".join(re.escape(sx) for sx in zodiac)
+    out = [
+        Play("pingte", "平特", r"(?:平特|平码|平肖|平)((?:%s)+)" % sxs,
+             _r_pingte, 95, mode="flat"),
+        Play("lianxiao", "连肖", r"([二三四五]?)连肖\s*((?:%s)+)" % sxs,
+             _r_lianxiao, 92),
+    ]
+    out += [Play("zodiac:%s" % sx, "生肖", r"(%s)" % re.escape(sx), _r_zodiac, 40)
+            for sx in zodiac]
+    return out
+
+
+# ======================== 单价 ========================
+
+# 文档里的格式词全收：各/各号/各码/各数/个/买/叫/约/每个号/每码/一个号/=
+_PRICE = re.compile(
+    r"(?:各号|各码|各数|每个号|每个数|一个号|一个数|每码|各|个|买|叫|约|=|≈)"
+    r"\s*([0-9零一二两三四五六七八九十百千万]+)\s*(?:元|块)?"
+)
+
+
+# 非生肖玩法词末字。这些玩法本身已经圈定了号码范围，后面再跟数字，
+# 那个数字只可能是钱 —— 要指定号码就直接写号码，不会先写玩法再写一个号。
+_PLAY_TAIL_CHARS = "红蓝绿单双小大合数码金木水火土禽兽畜波色尾头肖家岁"
+
+# 阿拉伯数字 + 中文数字，金额两种写法都要认（"小双50" / "小双五十"）
+_NUM_CHARS = "0-9零一二两三四五六七八九十百千万"
+
+
+def _tail_amount(s: str):
+    """非生肖玩法词 + 结尾数字（可带"元/块"）。返回 (金额, 剩余文本) 或 None。
+
+    小双20 / 红波100 / 5尾60 / 小双20元 / 小双五十 都走这里，不限大小。
+    生肖不放进来：生肖后面跟数字另走专门分支（"虎5" 的 5 是 05 号）。
+    """
+    m = re.search(r"[%s]\s*([%s]+)\s*([元块])?\s*$"
+                  % (_PLAY_TAIL_CHARS, _NUM_CHARS), s)
+    if not m:
+        return None
+    v = cn2num(m.group(1))
+    if not v or v <= 0:
+        return None
+    return float(v), s[:m.start() + 1].strip()
+
+
+def _bare_tail_price(s: str):
+    """只写号码时，末尾那个数字当单价。返回 (金额, 剩余文本) 或 None。
+
+    只认两种明确情况，其余的纯号码串原样不动（"1 13 34" 是三个号）：
+      · 末尾 > 49  —— 号码最大 49，不可能是号（"5 50" = 5 号各 50）
+      · 末尾和前一个数字相同 —— "5 5"，客户把号码和张数各写了一遍
+    """
+    if not re.fullmatch(r"[\s*/\\\-._0-9]+", s):
+        return None                      # 带汉字/玩法的项走前面的分支，这里只管纯数字
+    toks = re.findall(r"\d+(?:\.\d+)?", s)
+    if len(toks) < 2:
+        return None
+    last, prev = float(toks[-1]), float(toks[-2])
+    if last <= 49 and last != prev:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*$", s)
+    head = s[:m.start()].strip()
+    if not head:
+        return None
+    return last, head
+
+
+def _take_unit(s: str, sx_chars: str) -> Tuple[Optional[float], str]:
+    """抽单价。抽不到就返回 (None, 原文) —— 由调用方决定是默认 10 还是判失败。
+
+    三条路径：
+      1. 带格式词：各50 / 个50 / 每个号50
+      2. 生肖直接跟数字：鼠50 / 牛马30（生肖后面跟数字一律当金额；
+         "虎5 17各20" 里虎5 的 5 由切项阶段保住，不会走到这里）
+      3. 其它玩法词跟数字：小双50 / 小双20 / 红波100
+    """
+    m = _PRICE.search(s)
+    if m:
+        v = cn2num(m.group(1))
+        if v and v > 0:
+            rest = (s[:m.start()] + " " + s[m.end():]).strip()
+            return v, rest
+
+    # 「生肖 + 数字」结尾（可带"元/块"）
+    m2 = re.search(r"([%s]+)\s*(\d+(?:\.\d+)?)\s*(?:元|块)?\s*$" % sx_chars, s)
+    if m2:
+        v = float(m2.group(2))
+        if v > 0:
+            return v, (s[:m2.start()] + m2.group(1)).strip()
+
+    got = _tail_amount(s)
+    if got:
+        return got
+
+    # 末尾数字 > 49：号码最大 49，它不可能是号，只能是钱。
+    # 专门收拾 "尾数5 100"、"尾数5 一百"、"1 13 100" 这种数字夹在玩法/号码中间的写法
+    # （"尾数5" 里的 5 是尾号，100 才是金额）。
+    m3 = re.search(r"([%s]+)\s*(?:元|块)?\s*$" % _NUM_CHARS, s)
+    if m3:
+        v = cn2num(m3.group(1))
+        if v and v > 49:
+            head = s[:m3.start()].strip()
+            if head and re.search(r"[\u4e00-\u9fff]", head):
+                return float(v), head
+
+    got = _bare_tail_price(s)
+    if got:
+        return got
+
+    return 10.0, s
+
+
+# ======================== 切项 ========================
+
+# 单价标记：判断"这一段是不是一个完整的注"
+_HAS_PRICE = re.compile(
+    r"(?:各号|各码|各数|每个号|每个数|一个号|一个数|每码|各|个|买|叫|约|=|≈)"
+    r"\s*[0-9零一二两三四五六七八九十百千万]+\s*(?:元|块)?"
+)
+
+
+def _looks_priced(seg: str, sx_chars: str) -> bool:
+    """这一段能不能自己成一个注。
+
+    带格式词的（各50 / 每码50）直接算，另外"玩法词 + 50 以上数字"也算：
+    50 不可能是号码，只能是钱，所以 "小双50" 可以自己成一项。
+    "虎5" 里的 5 仍按号码处理，不会被切出去。
+    """
+    if _HAS_PRICE.search(seg):
+        return True
+    return bool(_tail_amount(seg))
+
+
+def _subject_amount(seg: str, sx_chars: str) -> bool:
+    """整段就是"对象 + 数字"（鼠50 / 牛 30 / 红单 50），可以收尾成一项。
+
+    只要求形状，不管数字大小 —— 号码最大 49，"鼠50" 的 50 只可能是钱，
+    而 "虎5" 的 5 只有当后面还挂着号码时才是号码（那种情况 buf 里会有别的段，形状对不上）。
+    """
+    return bool(re.fullmatch(r"[%s%s]+\s*[%s]+"
+                            % (re.escape(sx_chars), _PLAY_TAIL_CHARS, _NUM_CHARS),
+                            (seg or "").strip()))
+
+
+def _is_subject_head(seg: str, sx_chars: str) -> bool:
+    """这一段以生肖/玩法词开头 —— 说明上一段已经下完了，这是新的一注。"""
+    s = (seg or "").strip()
+    if not s:
+        return False
+    return s[0] in sx_chars or s[0] in _PLAY_TAIL_CHARS
+
+
+def split_items(text: str, sx_chars: str) -> List[str]:
+    """把一条消息切成若干个独立的注。
+
+    逗号/分号/空格都可能只是分隔符，也可能是在拼一个完整的注
+    （"虎5 17各20" 里的空格是分隔符，"5尾各20 猴各25" 里的空格是分项）
+    所以按"有没有单价"来判定边界：没单价的一律并到下一个有单价的段里。
+
+    额外处理两种连着下多注的写法（都是客户真实发过/会发的）：
+      "鼠 50 牛 30"     几组「生肖+金额」连写
+      "红单 50 蓝双 30" 几组「玩法+金额」连写
+    判据：前面已经攒成一个"对象+数字"、下一段又以生肖/玩法开头 —— 这里就是注与注的边界。
+    """
+    segs = [x for x in re.split(r"[,;\s]+", text) if x.strip()]
+    out: List[str] = []
+    buf = ""
+    for seg in segs:
+        seg = seg.strip()
+        if not seg:
+            continue
+        if buf and _subject_amount(buf, sx_chars) and _is_subject_head(seg, sx_chars):
+            out.append(buf)
+            buf = seg
+            continue
+        if _looks_priced(seg, sx_chars):
+            out.append((buf + " " + seg).strip())
+            buf = ""
+        else:
+            buf = (buf + " " + seg).strip()
+    if buf:
+        if out and _subject_amount(buf, sx_chars):
+            out.append(buf)            # "鼠 50 牛 30" 的最后一段
+        elif out:
+            out[-1] += " " + buf
+        else:
+            out.append(buf)
+    return [x for x in out if x.strip()]
+
+
+# ======================== 单项解析 ========================
+
+def _scan(body: str, zodiac: Dict[str, List[str]], sx_chars: str):
+    """在一项里反复扫描玩法，直到扫不动为止。
+
+    这个循环让 "红单绿双" / "鼠马" / "1 13 34" 混写都能吃下来 ——
+    不比一个 word 全能匹配，只看每个位置能被谁认领。
+    """
+    nums: Set[str] = set()
+    names: List[str] = []
+    flat: List[str] = []
+    work = body
+    guard = 0
+    plays = PLAYS + _zodiac_plays(zodiac)
+
+    while work.strip() and guard < 40:
+        guard += 1
+        hit = None
+        for p in plays:
+            m = p.pattern.search(work)
+            if m:
+                got = p.resolve(m, zodiac)
+                if got:
+                    hit = (m, got, p)
+                    break
+        if not hit:
+            break
+        m, got, p = hit
+        nums |= set(got)
+        names.append((m.start(), m.group(0)))
+        if p.mode == "flat":
+            flat.append(m.group(0))
+        work = work[:m.start()] + " " * (m.end() - m.start()) + work[m.end():]
+
+    # 描述按原文位置排，否则 "牛马" 会写成 "马 牛"
+    return (nums, [x[1] for x in sorted(names, key=lambda y: y[0])], work,
+            " ".join(flat))
+
+
+def _take_numbers(s: str) -> Tuple[Set[str], str]:
+    """把剩下的纯号码捡出来，捡不动的原样返回（调用方会判失败）。"""
+    nums: Set[str] = set()
+    left: List[str] = []
+    for tok in re.split(r"[\s*/\\\-._]+", s):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if re.fullmatch(r"\d+", tok):
+            v = int(tok)
+            if 1 <= v <= 49:
+                nums.add(_two(v))
+                continue
+        left.append(tok)
+    return nums, " ".join(left)
+
+
+def parse_item(raw: str, zodiac: Dict[str, List[str]], sx_chars: str) -> Optional[dict]:
+    """解析一项。返回 {nums, unit, desc}；吃不下返回 None。"""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if _UNSUPPORTED.search(s):
+        return None
+
+    # 粘连歧义：生肖紧贴数字再跟"尾/头"（"鼠5尾"里的 5 既可能是号码又可能是尾号）。
+    # 必须"紧贴"才算 —— "鼠 5 5尾" 里的空格已经把 5 和鼠分开了，那是合法的写法。
+    if re.search(r"[%s]\d+(?:\.\d+)?\s*(?:尾|头)" % sx_chars, s):
+        return None
+
+    unit, body = _take_unit(s, sx_chars)
+    nums, names, rest, flat = _scan(body, zodiac, sx_chars)
+
+    extra, leftover = _take_numbers(rest)
+    if leftover.strip():
+        return None                      # 还有认不出的碎片，整项交模型
+    if extra:
+        nums |= extra
+        # 不再往描述里塞 "N个号"：回复文案会把号码逐个列出来，写个数是多余的
+
+    if not nums:
+        return None
+
+    return {"nums": nums, "unit": unit, "desc": " ".join(names), "flat": flat}
+
+
+# ======================== 对外入口 ========================
+
+def _fmt(v: float) -> str:
+    return ("%.0f" % v) if float(v).is_integer() else ("%.2f" % v)
+
+
+def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
+    """规则解析。ok=True 时 bets 可以直接入账，不用再调模型。
+
+    返回：
+      ok      是否整条都被规则吃下
+      bets    {号码: 每号金额}
+      items   [{desc, unit, count, amount}] 供回复文案用
+      detail  回复文案，如 "鼠 各50共计200"
+      market  HK / MO
+      reason  失败原因
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return {"ok": False, "reason": "空文本", "bets": {}, "items": [],
+                "detail": "", "market": "MO"}
+
+    t = normalize(raw)
+    if _UNSUPPORTED.search(t):
+        # fatal：12/13/14 只有占位、没有实现，送模型也只会瞎猜 —— 直接判死
+        return {"ok": False, "fatal": True,
+                "reason": "暂不支持的玩法（平特/连肖/中特）",
+                "bets": {}, "items": [], "detail": "", "market": detect_market(t)}
+
+    # 第 0 层：一个数字都没有 —— 寒暄、表情、图片占位、指令，不可能是下注。
+    # 直接毙掉，别拿去喂模型（要花额度，还慢几百毫秒）。中文数字已经在
+    # normalize 里转成阿拉伯数字了，所以"鼠五十"到这一步是有数字的。
+    if (not re.search(r"\d", t)
+            and not re.search(r"[零一二两三四五六七八九十百千万]", t)):
+        return {"ok": False, "fatal": True, "reason": "非下注内容",
+                "bets": {}, "items": [], "detail": "", "market": detect_market(t)}
+
+    # 粘连歧义：生肖紧贴数字再跟"尾/头"（"鼠5尾"里的 5 既可能是号码又可能是尾号）。
+    # 模型碰到这种会凭感觉猜一个，宁可判死也不让它猜。
+    if re.search(r"[%s]\d+(?:\.\d+)?\s*(?:尾|头)" % "".join(zodiac.keys()), t):
+        return {"ok": False, "fatal": True,
+                "reason": "写法有歧义（鼠5尾 请写成 鼠 5 5尾各10）",
+                "bets": {}, "items": [], "detail": "", "market": detect_market(t)}
+
+    market = detect_market(t)
+    # 港澳标记词只是分盘用的，不是下注内容 —— 不抹掉会被当成认不出的碎片，
+    # 整条消息就白丢给模型了。
+    for w in ("新奥", "香港", "澳门", "奥门", "港", "澳", "香", "奥", "巷", "门"):
+        t = t.replace(w, "")
+
+    sx_chars = "".join(zodiac.keys())
+
+    items_out: List[dict] = []
+    bets: Dict[str, float] = {}
+    extras: List[dict] = []
+    parts: List[str] = []
+
+    for seg in split_items(t, sx_chars):
+        got = parse_item(seg, zodiac, sx_chars)
+        if got is None:
+            return {"ok": False, "reason": "规则解析不了：%s" % seg,
+                    "bets": {}, "items": [], "detail": "", "market": market}
+
+        unit = got["unit"]
+        if got["flat"]:
+            # 12 平特整肖、14 二中二/三中三：原文那个数就是整笔金额，号码不落盘
+            play = got["desc"] or seg.strip()
+            extras.append({"play": play, "text": seg.strip(),
+                           "amount": round(unit, 2),
+                           "nums": ",".join(str(int(n)) for n in sorted(got["nums"]))})
+            parts.append("%s 共%s" % (play, _fmt(unit)))
+            continue
+
+        for n in got["nums"]:
+            bets[n] = round(bets.get(n, 0.0) + unit, 2)
+        amount = round(unit * len(got["nums"]), 2)
+        nums_txt = ",".join(str(int(n)) for n in sorted(got["nums"]))
+        items_out.append({"desc": got["desc"], "unit": unit,
+                          "count": len(got["nums"]), "amount": amount,
+                          "nums": nums_txt})
+        # 回复文案形如 "马：1,13,25,37,49 各10 共计50"；纯号码项没有玩法名，直接列号
+        head = "%s：" % got["desc"] if got["desc"] else ""
+        parts.append("%s%s 各%s 共计%s"
+                     % (head, nums_txt, _fmt(unit), _fmt(amount)))
+
+    if not bets and not extras:
+        return {"ok": False, "reason": "没认出任何号码", "bets": {},
+                "items": [], "detail": "", "market": market}
+
+    flat_total = round(sum(e["amount"] for e in extras), 2)
+    return {"ok": True, "bets": bets, "items": items_out,
+            "extras": extras, "flat_total": flat_total,
+            "detail": "；".join(parts), "market": market, "reason": ""}

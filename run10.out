@@ -1,0 +1,11 @@
+[data] 已把程序目录里的老数据复制到 C:\Users\Administrator\AppData\Local\MarkSixBot\data（state/、contacts/、targets/、backups/、logs/、processed_ids.json、seen_fingerprints.json）
+📅 当年生肖：马 (01, 13, 25, 37, 49)
+🔐 验签：开启（密钥 1 把）
+👤 当前账号：default（已接账号：guochangjin1）
+📡 接收地址：http://0.0.0.0:8899/wx/hook
+🖥  网页看板：http://127.0.0.1:8899/
+🤖 模型：qwen3.8-27b（思考模式 关闭）
+💾 数据目录：C:\Users\Administrator\AppData\Local\MarkSixBot\data
+✅ 已就绪，按 Ctrl+C 停止
+ * Serving Flask app 'main'
+ * Debug mode: off

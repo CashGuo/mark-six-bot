@@ -1,0 +1,49 @@
+# Python 虚拟环境
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 环境变量（包含 API Key，不要上传）
+.env
+
+# 编译产物与构建环境（可重建，不进版本库）
+build/out/
+build/release/
+build/venv/
+build/wxauto_env/
+build/_smoke/
+build/_smoke_data/
+build/_smoke_data2/
+build/_cfg_backup/
+*.build/
+*.dist/
+*.onefile-build/
+
+# 真实运行配置（含推送密钥与客户清单，只留模板）
+config/server.json
+config/wx_clients.json
+
+# 运行时锁与令牌
+.bot.lock
+.api_token
+
+# 数据文件
+numbers_state.json
+numbers_state.json.tmp
+records.jsonl
+unparsed.jsonl
+processed_ids.json
+backups/
+logs/
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统文件
+.DS_Store
+Thumbs.db

@@ -1,0 +1,25 @@
+2026-11-12 15:04:18,430 - INFO - 🚀 六合彩记账（微信推送版）启动中...
+2026-11-12 15:04:18,432 - INFO - 当前农历年份：2026年马年
+2026-11-12 15:04:18,534 - INFO - WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8899
+ * Running on http://192.168.42.10:8899
+2026-11-12 15:04:18,534 - INFO - Press CTRL+C to quit
+2026-11-12 15:04:22,439 - INFO - 当前农历年份：2026年马年
+2026-11-12 15:04:23,824 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 15:04:23,829 - INFO - AI返回：{"items":[{"type":"zodiac","names":["马","鼠","鸡"],"amount":15}]}
+2026-11-12 15:04:23,829 - INFO - 展开结果：13 个号码，共 $195.00
+2026-11-12 15:04:23,835 - INFO - 记账成功：临时测试群 $195.00，13个号码，累计 $475.00
+2026-11-12 15:04:23,835 - INFO - 收到推送 batch=chk-1794467062 共1条 记账1 未解析0 跳过0 cust=C0001
+2026-11-12 15:04:23,836 - INFO - 127.0.0.1 - - [12/Nov/2026 15:04:23] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 15:05:16,554 - INFO - 127.0.0.1 - - [12/Nov/2026 15:05:16] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 15:05:16,568 - INFO - 127.0.0.1 - - [12/Nov/2026 15:05:16] "GET / HTTP/1.1" 200 -
+2026-11-12 15:05:58,253 - INFO - 127.0.0.1 - - [12/Nov/2026 15:05:58] "GET / HTTP/1.1" 200 -
+2026-11-12 15:05:58,363 - INFO - 127.0.0.1 - - [12/Nov/2026 15:05:58] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 15:05:58,419 - INFO - 127.0.0.1 - - [12/Nov/2026 15:05:58] "GET /favicon.ico HTTP/1.1" 404 -
+2026-11-12 15:05:58,436 - INFO - 127.0.0.1 - - [12/Nov/2026 15:05:58] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 15:06:15,334 - INFO - 127.0.0.1 - - [12/Nov/2026 15:06:15] "GET / HTTP/1.1" 200 -
+2026-11-12 15:06:15,364 - INFO - 127.0.0.1 - - [12/Nov/2026 15:06:15] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 15:06:15,446 - INFO - 127.0.0.1 - - [12/Nov/2026 15:06:15] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 15:06:15,471 - INFO - 127.0.0.1 - - [12/Nov/2026 15:06:15] "GET /favicon.ico HTTP/1.1" 404 -
+2026-11-12 15:07:40,265 - INFO - 127.0.0.1 - - [12/Nov/2026 15:07:40] "GET /health HTTP/1.1" 200 -

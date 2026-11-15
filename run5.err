@@ -1,0 +1,54 @@
+2026-11-12 16:14:30,009 - INFO - 🚀 六合彩记账（微信推送版）启动中...
+2026-11-12 16:14:30,012 - INFO - 当前农历年份：2026年马年
+2026-11-12 16:14:30,070 - INFO - WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8899
+ * Running on http://192.168.1.47:8899
+2026-11-12 16:14:30,071 - INFO - Press CTRL+C to quit
+2026-11-12 16:14:37,399 - INFO - 127.0.0.1 - - [12/Nov/2026 16:14:37] "GET /health HTTP/1.1" 200 -
+2026-11-12 16:14:37,451 - INFO - 127.0.0.1 - - [12/Nov/2026 16:14:37] "GET /api/accounts HTTP/1.1" 200 -
+2026-11-12 16:15:47,298 - INFO - 当前农历年份：2026年马年
+2026-11-12 16:15:47,299 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:47] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:15:50,245 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:15:50,252 - INFO - AI返回：{"items":[{"type":"zodiac","names":["马"],"amount":10}]}
+2026-11-12 16:15:50,252 - INFO - 展开结果：5 个号码，共 $50.00
+2026-11-12 16:15:50,260 - INFO - 记账成功：[t_a] 测试群 $50.00，5个号码，累计 $50.00
+2026-11-12 16:15:50,263 - INFO - 收到推送 batch=1794471347-mul-a-1 共1条 记账1 未解析0 跳过0 cust=C0001 acc=t_a
+2026-11-12 16:15:50,263 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:50] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:15:50,292 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:50] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:15:50,930 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:15:50,932 - INFO - AI返回：{"items":[{"type":"zodiac","names":["马"],"amount":10}]}
+2026-11-12 16:15:50,932 - INFO - 展开结果：5 个号码，共 $50.00
+2026-11-12 16:15:50,937 - INFO - 记账成功：[t_b] 测试群 $50.00，5个号码，累计 $50.00
+2026-11-12 16:15:50,938 - INFO - 收到推送 batch=1794471350-mul-b-1 共1条 记账1 未解析0 跳过0 cust=C0001 acc=t_b
+2026-11-12 16:15:50,938 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:50] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:15:50,955 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:50] "GET /api/dashboard?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:15:50,985 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:50] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:15:51,017 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:15:51,024 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /api/dashboard HTTP/1.1" 200 -
+2026-11-12 16:15:51,718 - INFO - HTTP Request: POST https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2026-11-12 16:15:51,720 - INFO - AI返回：{"items":[{"type":"zodiac","names":["鼠"],"amount":10}]}
+2026-11-12 16:15:51,721 - INFO - 展开结果：4 个号码，共 $40.00
+2026-11-12 16:15:51,725 - INFO - 记账成功：[t_a] 测试群 $40.00，4个号码，累计 $90.00
+2026-11-12 16:15:51,727 - INFO - 收到推送 batch=1794471351-mul-a-fp1 共1条 记账1 未解析0 跳过0 cust=C0001 acc=t_a
+2026-11-12 16:15:51,727 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:15:51,748 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:15:51,780 - INFO - [跨账号重复] t_b 鼠各号10米
+2026-11-12 16:15:51,782 - INFO - 收到推送 batch=1794471351-mul-b-fp 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_b
+2026-11-12 16:15:51,782 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:15:51,788 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /api/dashboard?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:15:51,794 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /api/dashboard?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:15:51,823 - INFO - 收到推送 batch=1794471351-mul-a-fp1 共1条 记账0 未解析0 跳过1 cust=C0001 acc=t_a
+2026-11-12 16:15:51,824 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "POST /wx/hook HTTP/1.1" 200 -
+2026-11-12 16:15:51,833 - INFO - 监听配置已更新：[t_a] 1 项，version=1
+2026-11-12 16:15:51,834 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "POST /api/targets HTTP/1.1" 200 -
+2026-11-12 16:15:51,841 - INFO - 监听配置已更新：[t_b] 1 项，version=1
+2026-11-12 16:15:51,842 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "POST /api/targets HTTP/1.1" 200 -
+2026-11-12 16:15:51,848 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /wx/targets?account=t_a HTTP/1.1" 200 -
+2026-11-12 16:15:51,855 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /wx/targets?account=t_b HTTP/1.1" 200 -
+2026-11-12 16:15:51,862 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /wx/targets HTTP/1.1" 200 -
+2026-11-12 16:15:51,866 - WARNING - targets 拉取验签失败 ts=1794471351 cust=
+2026-11-12 16:15:51,867 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /wx/targets?account=t_a HTTP/1.1" 401 -
+2026-11-12 16:15:51,880 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "GET /api/accounts HTTP/1.1" 200 -
+2026-11-12 16:15:51,892 - INFO - 监听配置已更新：[default] 0 项，version=1
+2026-11-12 16:15:51,893 - INFO - 127.0.0.1 - - [12/Nov/2026 16:15:51] "POST /api/targets HTTP/1.1" 200 -

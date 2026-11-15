@@ -1,0 +1,2432 @@
+# -*- coding: utf-8 -*-
+"""服务端控制台 —— 双击 MarkSixBot.exe（不带参数）就打开这个窗口。
+
+单机版：原先网页看板能看的、能点的，这里都有一份，不用开浏览器。
+
+三个页签：
+  · 总览 —— 汇总数字 + 号码盘 + 风险排序 + 最近记账 + 未解析
+  · 配置 —— 推送密钥 / 大模型 Key / 端口
+  · 日志 —— 当天日志尾巴
+
+监听对象已不再由服务端管：好友/群清单属于敏感数据，采集端要求不出本机，
+所以那一页连同「下发 targets」整条链路都删掉了。
+
+**故意不 import main**：main 一被导入就会立刻挂日志 FileHandler、
+建 Flask app、抢 .bot.lock，GUI 进程会跟后台服务互相打架（日志文件被占用、
+锁拿不到）。所以路径、配置、读数据都在 msb_paths / msb_view 里各实现一份。
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+import msb_view
+import msb_paths as _paths
+
+# 版本号规则：主.次.修订。修 bug / 改文案 → 修订号；加功能 → 次版本；
+# 换底层方案（换存储、换协议、旧数据不兼容）→ 主版本。
+# 这里只写版本号本身，标题栏由 window_title() 拼上；出包日期由打包脚本
+# 注入 MSB_VERSION / MSB_BUILD_DATE 环境变量后覆盖。
+APP_VERSION = "1.0.0"
+BUILD_DATE = ""
+
+
+def window_title():
+    """标题栏是界面里唯一显示版本号的地方，别在窗口内部重复显示。"""
+    ver = (os.environ.get("MSB_VERSION") or "").strip() or APP_VERSION
+    date = (os.environ.get("MSB_BUILD_DATE") or "").strip() or BUILD_DATE
+    t = "记账中台 v%s" % ver
+    if date:
+        t += " · %s" % date
+    return t
+
+
+# 采集端白名单：一个微信号一把钥匙，由厂商签发工具写入，服务端只读。
+# 路径与 main.CLIENTS_PATH 保持一致（config 目录下），这里不 import main，
+# 所以自己按 CONFIG_PATH 推一遍。
+WHITELIST_PATH = Path(_paths.CONFIG_PATH).parent / "wx_clients.json"
+
+
+CLR_BG = "#f6f7f9"
+CLR_CARD = "#ffffff"
+CLR_LINE = "#dfe3e8"
+CLR_OK = "#1a7f37"
+CLR_BAD = "#c0392b"
+CLR_MUTED = "#6b7280"
+CLR_BLUE = "#1f6feb"
+CLR_RED = "#c0392b"
+CLR_BLUE2 = "#2b6cb0"
+CLR_GREEN = "#2b8a5f"
+CLR_GREY = "#aab2bd"
+
+FONT = ("Microsoft YaHei UI", 11)
+FONT_B = ("Microsoft YaHei UI", 11, "bold")
+FONT_S = ("Microsoft YaHei UI", 10)
+FONT_T = ("Microsoft YaHei UI", 15, "bold")
+
+# 号码盘用等宽数字，看得清
+FONT_NUM = ("Consolas", 15, "bold")
+FONT_AMT = ("Consolas", 14)
+FONT_CELL = ("Microsoft YaHei UI", 13, "bold")
+
+
+class TabBar(tk.Frame):
+    """自绘页签：每个页签固定宽高，选中的用深色底 + 白字。
+
+    为什么不用 ttk.Notebook：ttk 的页签宽度由标题文字长度决定，而「选中」态
+    在 vista 主题下会向内缩一圈、在 clam 主题下会向下多探 2 像素去压内容区的
+    边框（实测选中 42px、未选中 40px）。几个页签因此总是大小不一，而且选中的
+    那个还比未选中的浅。这里改成固定像素的方块，选不选中尺寸完全一样。
+
+    对外接口按 ttk.Notebook 的用法写：add(frame, text=...) / select(frame) /
+    current() / index(frame)，另外用 on_change() 代替 <<NotebookTabChanged>>。
+    """
+
+    BTN_W = 108          # 每个页签的宽度（像素），与标题长短无关
+    BTN_H = 34           # 高度
+    ON_BG, ON_FG = "#2b3444", "#ffffff"
+    OFF_BG, OFF_FG = "#e7eaee", "#3b4453"
+
+    def __init__(self, master, bg="#f6f7f9"):
+        super().__init__(master, bg=bg)
+        self._bar = tk.Frame(self, bg=bg)
+        self._bar.pack(fill="x")
+        tk.Frame(self, height=1, bg=CLR_LINE).pack(fill="x")
+        self._body = tk.Frame(self, bg=bg)
+        self._body.pack(fill="both", expand=True)
+        self._items = []          # [(holder, label, frame)]
+        self._cur = -1
+        self._cb = None
+
+    def add(self, frame, text="", **_ignored):
+        idx = len(self._items)
+        holder = tk.Frame(self._bar, width=self.BTN_W, height=self.BTN_H,
+                          bg=self.OFF_BG, cursor="hand2")
+        holder.pack(side="left", padx=(0, 2))
+        holder.pack_propagate(False)
+        lab = tk.Label(holder, text=text, font=FONT, bg=self.OFF_BG,
+                       fg=self.OFF_FG, cursor="hand2")
+        lab.place(relx=0.5, rely=0.5, anchor="center")
+        for w in (holder, lab):
+            w.bind("<Button-1>", lambda _e, i=idx: self.select(i))
+        self._items.append((holder, lab, frame))
+        if self._cur < 0:
+            self._cur = idx
+            self._apply()
+        return frame
+
+    def tabs(self):
+        return tuple(f for _, _, f in self._items)
+
+    def index(self, frame):
+        for i, (_, _, f) in enumerate(self._items):
+            if f is frame or str(f) == str(frame):
+                return i
+        return -1
+
+    def current(self):
+        return self._cur
+
+    def select(self, target):
+        idx = target if isinstance(target, int) else self.index(target)
+        if not (0 <= idx < len(self._items)):
+            return
+        self._cur = idx
+        self._apply()
+        if self._cb:
+            try:
+                self._cb()
+            except Exception:
+                pass
+
+    def _apply(self):
+        for i, (holder, lab, frame) in enumerate(self._items):
+            on = (i == self._cur)
+            holder.configure(bg=self.ON_BG if on else self.OFF_BG)
+            lab.configure(bg=self.ON_BG if on else self.OFF_BG,
+                          fg=self.ON_FG if on else self.OFF_FG,
+                          font=FONT_B if on else FONT)
+            if on:
+                frame.pack(in_=self._body, fill="both", expand=True)
+            else:
+                frame.pack_forget()
+
+    def on_change(self, func):
+        """页签切换回调（代替 ttk 的 <<NotebookTabChanged>>）。"""
+        self._cb = func
+
+DEFAULT_BASE = ("https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com"
+                "/compatible-mode/v1")
+
+DEFAULTS = {
+    "port": 8899,
+    "host": "0.0.0.0",
+    "wx_push_secret": "",
+    "wx_account_secrets": "",
+    "wx_skew_sec": 300,
+    "llm_api_key": "",
+    "llm_base_url": DEFAULT_BASE,
+    "llm_model": "qwen3.8-27b",
+    "llm_thinking": 0,
+    "llm_timeout": 60,
+    "contacts_interval_sec": 21600,
+}
+
+
+# ---------------- 路径与配置 ----------------
+
+def app_dir() -> Path:
+    return _paths.APP_DIR
+
+
+def data_dir() -> Path:
+    return _paths.DATA_DIR
+
+
+def config_path() -> Path:
+    return _paths.CONFIG_PATH
+
+
+# 打开面板也做一次迁移：否则客户第一眼看到「0 个账号 / 0 元」，会以为账丢了
+_ADOPTED = _paths.adopt_old_layout()
+
+
+def read_cfg() -> dict:
+    d = dict(DEFAULTS)
+    p = config_path()
+    if p.exists():
+        try:
+            with open(p, "r", encoding="utf-8-sig") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    d[k] = v
+        except Exception:
+            pass
+    return d
+
+
+def write_cfg(d: dict) -> None:
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    doc = dict(read_cfg())
+    doc.update(d)
+    tmp = p.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+# ---------------- 运行状态 ----------------
+
+def self_cmd() -> list:
+    """起后台服务用的命令行。打包后就是自己的 EXE。"""
+    exe = Path(sys.argv[0])
+    try:
+        if exe.suffix.lower() == ".exe" and exe.is_file():
+            return [str(exe.resolve())]
+    except Exception:
+        pass
+    return [sys.executable, str(Path(__file__).resolve().parent / "main.py")]
+
+
+def pid_path() -> Path:
+    return data_dir() / ".server_gui.pid"
+
+
+def health(port: int, timeout: float = 2.0):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/health" % int(port),
+                                    timeout=timeout) as r:
+            body = r.read(64).decode("utf-8", "ignore")
+            return (int(getattr(r, "status", 200)) == 200 and body.strip().startswith("OK"),
+                    "HTTP %s" % getattr(r, "status", "?"))
+    except urllib.error.HTTPError as e:
+        return False, "HTTP %s" % e.code
+    except Exception as e:
+        return False, type(e).__name__
+
+
+def _pid_alive(pid: int) -> bool:
+    """直接问内核，不拉 tasklist（Windows 11 会把控制台程序转到 Windows Terminal，闪黑窗）。"""
+    if not pid:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
+                                           ctypes.POINTER(wintypes.DWORD)]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = k32.OpenProcess(0x1000, False, int(pid))   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = wintypes.DWORD(0)
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259          # STILL_ACTIVE
+    except Exception:
+        return False
+
+
+def running_pid() -> int:
+    try:
+        return int(pid_path().read_text(encoding="utf-8").strip() or 0)
+    except Exception:
+        return 0
+
+
+def api_token() -> str:
+    """服务端启动时生成的令牌，存在数据目录。控制台每个请求都带上它。
+
+    光靠"来源是本机"不够：端口转发或反向代理会把来源变成 127.0.0.1，
+    那时候控制台专用的接口（读聊天原文、撤销、清空）谁都能调。
+    """
+    try:
+        p = data_dir() / ".api_token"
+        if p.exists():
+            return (p.read_text(encoding="utf-8") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def api_headers(extra: dict = None) -> dict:
+    h = {}
+    tok = api_token()
+    if tok:
+        h["X-Msb-Token"] = tok
+    if extra:
+        h.update(extra)
+    return h
+
+
+def api_post(path: str, payload=None, port: int = 8899) -> dict:
+    """调本地接口。备份 / 清空 / 下发监听对象这些写操作走接口，
+    不直接改文件 —— 服务端内存里有缓存，绕过去会打架。"""
+    url = "http://127.0.0.1:%d%s" % (int(port), path)
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    headers = api_headers(headers)
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8", "ignore") or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode("utf-8", "ignore") or "{}")
+        except Exception:
+            return {"ok": False, "error": "HTTP %s" % e.code}
+    except Exception as e:
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def api_get(path: str, port: int = 8899) -> dict:
+    """只读接口。和 api_post 一样带令牌，失败也返回字典而不是抛异常。"""
+    url = "http://127.0.0.1:%d%s" % (int(port), path)
+    req = urllib.request.Request(url, headers=api_headers(), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8", "ignore") or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode("utf-8", "ignore") or "{}")
+        except Exception:
+            return {"ok": False, "error": "HTTP %s" % e.code}
+    except Exception as e:
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def fmt_money(v) -> str:
+    """865.0 → 865；865.5 → 865.5。金额太小的小数点不显示成 .00。"""
+    try:
+        n = float(v or 0)
+    except Exception:
+        return "0"
+    if abs(n - round(n)) < 1e-9:
+        return "%.0f" % n
+    return ("%.2f" % n).rstrip("0").rstrip(".")
+
+
+# ---------------- 主窗口 ----------------
+
+class MainWindow:
+    def __init__(self, root):
+        self.root = root
+        self.cfg = read_cfg()
+        self._proc = None
+        self.acc = ""                 # 空 = 全部账号合计
+        self._acc_sig = None
+        # 澳门、香港两本账各一套号码盘/风险表，按盘口分别记指纹
+        self._grid_cells = {"MO": [], "HK": []}
+        self.grid_holder = {}
+        self.tv_risk = {}
+        # 号码盘 / 风险表 / 最近记账的「上次数值指纹」。三个表都是销毁重建，
+        # 一旦每 5 秒无条件重画，号码盘就是一屏闪烁。数值没变就别动它。
+        self._grid_sig = {}
+        # 号码盘字号跟着格子大小走：窗口一缩，15 号的字就会挤成一团。
+        # 这两个表存「当前字号」和「这一盘有几行」，缩放时只按行高重算字号。
+        self._grid_font = {}
+        self._grid_rows = {}
+        self._risk_sig = {}
+        self._rec_sig = None
+        # 最近记账每一行对应的消息号 / 是否已撤销。撤销按钮靠这两张表定位。
+        self._rec_mid = {}
+        self._rec_rev = {}
+        # 消息页和总览页都以这份消息流水为准（同一接口、同一份数据），
+        # 两边的「未解析」「已记账」才能对上；只缓存最近一次拉到的结果。
+        self._msg_rows = []
+        self._msg_pick = ""
+        self._log_pick = ""
+        # 消息页下拉「这一期 / 上一期 / 上上期」的期号表，和总览页共用
+        self._issue_opts = []
+
+        root.title(window_title())
+        root.configure(bg=CLR_BG)
+        root.minsize(1040, 700)
+
+        self._build_ui()
+        self._refresh_status()
+        self._loop()
+        if (os.environ.get("MSB_MANUAL") or "").strip():
+            self.root.after(900, self.open_manual)
+
+    # ---- 布局 ----
+    def _build_ui(self):
+        # 原来这里有一条「MarkSixBot 服务端控制台 + 副标题」的标题条，纯占高度，
+        # 程序名在窗口标题栏上已经有了，去掉。
+        card = tk.Frame(self.root, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                        highlightthickness=1)
+        card.pack(fill="x", padx=16, pady=(12, 8))
+        inner = tk.Frame(card, bg=CLR_CARD)
+        inner.pack(fill="x", padx=14, pady=10)
+
+        self.lb_state = tk.Label(inner, text="● 检测中",
+                                 font=("Microsoft YaHei UI", 13, "bold"),
+                                 bg=CLR_CARD, fg=CLR_MUTED)
+        self.lb_state.grid(row=0, column=0, sticky="w")
+        self.lb_hint = tk.Label(inner, text="", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED)
+        self.lb_hint.grid(row=0, column=1, columnspan=4, sticky="w", padx=10)
+
+        cells = [("端口", "lb_port"), ("看板地址", "lb_dash"), ("账号 / 累计 / 今日", "lb_sum")]
+        for i, (t, attr) in enumerate(cells):
+            wrap = tk.Frame(inner, bg=CLR_CARD)
+            wrap.grid(row=1, column=i, sticky="w", padx=(0, 26), pady=(8, 0))
+            tk.Label(wrap, text=t, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED).pack(anchor="w")
+            lb = tk.Label(wrap, text="—", font=FONT_B, bg=CLR_CARD, fg="#111827")
+            lb.pack(anchor="w")
+            setattr(self, attr, lb)
+
+        # 按钮条必须先于 Notebook 占位：Tk 的 pack 按调用顺序分空间，
+        # 先 pack 的 expand 控件会把剩余高度全吃掉，后 pack 的底部条就只剩一条缝。
+        bar = tk.Frame(self.root, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                       highlightthickness=1)
+        bar.pack(fill="x", side="bottom")
+
+        nb = TabBar(self.root, bg=CLR_BG)
+        nb.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self.nb = nb
+        self.tab_ov = tk.Frame(nb, bg=CLR_BG)
+        self.tab_cfg = tk.Frame(nb, bg=CLR_BG)
+        self.tab_wl = tk.Frame(nb, bg=CLR_BG)
+        self.tab_log = tk.Frame(nb, bg=CLR_BG)
+        nb.add(self.tab_ov, text="总览")
+        nb.add(self.tab_cfg, text="配置")
+        nb.add(self.tab_wl, text="白名单")
+        nb.add(self.tab_log, text="消息")
+        self._build_tab_overview(self.tab_ov)
+        self._build_tab_cfg(self.tab_cfg)      # 先建配置页：白名单页要用它的端口输入框
+        self._build_tab_white(self.tab_wl)
+        self._build_tab_log(self.tab_log)
+        nb.on_change(self._on_tab)
+
+        # 预选页签（调试 / 自检用，平时不设这个环境变量）
+        want = (os.environ.get("MSB_TAB") or "").strip()
+        if want.isdigit():
+            tabs = [self.tab_ov, self.tab_cfg, self.tab_wl, self.tab_log]
+            idx = int(want)
+            if 0 <= idx < len(tabs):
+                nb.select(tabs[idx])
+
+        def mkbtn(text, cmd, bg, fg, width=10):
+            return tk.Button(bar, text=text, font=FONT, bg=bg, fg=fg, relief="flat",
+                             bd=0, cursor="hand2", command=cmd, width=width)
+
+        # 启动 / 停止合成一个：文字和颜色跟着状态走，点一下就切
+        self.btn_run = mkbtn("启动服务", self.toggle_server, CLR_BLUE, "white", 11)
+        self.btn_run.pack(side="left", padx=(12, 6), pady=8)
+        mkbtn("手工记账", self.open_manual, "#eef7ff", CLR_BLUE2, 9).pack(side="left", padx=6, pady=8)
+        mkbtn("文本记账", self.open_quick, "#eef7ff", CLR_BLUE2, 9).pack(side="left", padx=6, pady=8)
+        mkbtn("备份", self.do_backup, "#eef0f3", "#374151", 7).pack(side="left", padx=6, pady=8)
+        mkbtn("清空当前账号", self.do_reset, "#fdf4f3", CLR_RED, 13).pack(side="left", padx=6, pady=8)
+        mkbtn("打开看板", self.open_dashboard, "#eef0f3", "#374151", 10).pack(side="left", padx=6, pady=8)
+        self.v_auto = tk.BooleanVar(value=self._autorun_on())
+        tk.Checkbutton(bar, text="开机自动启动", variable=self.v_auto, font=FONT_S,
+                       bg=CLR_CARD, fg=CLR_MUTED, activebackground=CLR_CARD,
+                       selectcolor=CLR_CARD, command=self.toggle_autorun
+                       ).pack(side="right", padx=12)
+
+    # ---------- 总览 ----------
+    def _build_tab_overview(self, tab):
+        # 顶部汇总条
+        sbar = tk.Frame(tab, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                        highlightthickness=1)
+        sbar.pack(fill="x", padx=10, pady=(10, 8))
+        row = tk.Frame(sbar, bg=CLR_CARD)
+        row.pack(fill="x", padx=12, pady=9)
+
+        tk.Label(row, text="总金额", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).pack(side="left")
+        self.lb_grand = tk.Label(row, text="0", font=("Microsoft YaHei UI", 20, "bold"),
+                                 bg=CLR_CARD, fg=CLR_RED)
+        self.lb_grand.pack(side="left", padx=(6, 18))
+
+        def chip(label, attr):
+            w = tk.Frame(row, bg=CLR_CARD)
+            w.pack(side="left", padx=(0, 16))
+            tk.Label(w, text=label, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED).pack(side="left")
+            lb = tk.Label(w, text="—", font=FONT_B, bg=CLR_CARD, fg="#111827")
+            lb.pack(side="left", padx=(4, 0))
+            setattr(self, attr, lb)
+
+        chip("本期", "lb_issue")
+        chip("生肖年", "lb_zyear")
+        # 香港、澳门两本账分开算，各露一个数
+        chip("澳门", "lb_mo")
+        chip("香港", "lb_hk")
+        chip("有注号码", "lb_kbets")
+        # 平特整肖、二中二这类只记总额、不进号码盘，单独露一个数
+        chip("不计号", "lb_flat")
+        chip("今日已记账", "lb_krec")
+        # 未解析只统计本期：上几期没解析的单已经随期归档，不该混进来
+        chip("本期未解析", "lb_kunp")
+
+        self.btn_unp = tk.Button(row, text="未解析 0", font=FONT_S, bg="#fdf4f3",
+                                 fg=CLR_RED, relief="flat", bd=0, cursor="hand2",
+                                 command=self.show_unparsed)
+        self.btn_unp.pack(side="left", padx=(4, 0))
+
+        tk.Label(row, text="账号", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).pack(side="right", padx=(6, 4))
+        self.acc_var = tk.StringVar(value="")
+        self.acc_sel = ttk.Combobox(row, textvariable=self.acc_var, state="readonly",
+                                    width=22, font=FONT_S)
+        self.acc_sel.pack(side="right")
+        self.acc_sel.bind("<<ComboboxSelected>>", self._on_acc_change)
+
+        # 版面：左边一列（上 = 澳门/香港两个号码盘，约占 4/5 高；下 = 最近记账），
+        # 右边一列（总额排序，上澳门、下香港，一直到底）。
+        # 最近记账的宽度就到排序区起点为止，右侧整条留给排序表。
+        body = tk.Frame(tab, bg=CLR_BG)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+        left = tk.Frame(body, bg=CLR_BG)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        # 用 place 按比例钉死：号码盘占上面 49%，剩下 50% 全给最近记账。
+        # 这里不能用 grid 权重 —— 12 行大字号会把自己的请求高度顶上去，
+        # 权重再小也压不下来（实测给 6:7 也还是 55%）。
+        # 左上：澳门、香港两个号码盘，左澳右港同时显示
+        garea = tk.Frame(left, bg=CLR_BG)
+        garea.place(x=0, y=0, relwidth=1.0, relheight=0.49)
+        for mk, title in (("MO", " 澳门 号码盘 "), ("HK", " 香港 号码盘 ")):
+            gp = tk.LabelFrame(garea, text=title, font=FONT_B, bg=CLR_BG,
+                               fg="#111827", bd=1, relief="groove")
+            gp.pack(side="left", fill="both", expand=True, padx=(0, 6))
+            holder = tk.Frame(gp, bg=CLR_BG)
+            holder.pack(fill="both", expand=True, padx=5, pady=5)
+            self.grid_holder[mk] = holder
+
+        # 左下：最近记账，钉在底部，高度占 50%，宽度就到排序区起点
+        bp = tk.LabelFrame(left, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
+                           fg="#111827", bd=1, relief="groove")
+        bp.place(x=0, rely=1.0, anchor="sw", relwidth=1.0, relheight=0.50)
+
+        # 过滤条：按期看。选项是具体三个期（本期 / 前一期 / 前二期），
+        # 不是「最近 N 期」这种含糊说法 —— 选中哪一期就只显示那一期。
+        bar = tk.Frame(bp, bg=CLR_BG)
+        bar.pack(fill="x", padx=6, pady=(4, 0))
+        tk.Label(bar, text="账期", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED
+                 ).pack(side="left")
+        self.rec_scope = ttk.Combobox(bar, state="readonly", width=18, font=FONT_S)
+        self.rec_scope.pack(side="left", padx=(4, 8))
+        self.rec_scope.bind("<<ComboboxSelected>>", self._on_rec_scope)
+        self.lb_rec_hint = tk.Label(bar, text="", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED)
+        self.lb_rec_hint.pack(side="left")
+
+        # 撤销做成表格最后一列的「点一下」单元格：Tk 的 Treeview 放不了行内按钮。
+        cols = ("ts", "issue", "chat", "who", "text", "nums", "amt", "grand", "op")
+        self._rec_op_col = "#%d" % len(cols)
+        box = tk.Frame(bp, bg=CLR_BG)
+        box.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        rsb = ttk.Scrollbar(box, orient="vertical")
+        self.tv_rec = ttk.Treeview(box, columns=cols, show="headings",
+                                   yscrollcommand=rsb.set)
+        rsb.configure(command=self.tv_rec.yview)
+        rsb.pack(side="right", fill="y")
+        for c, t, w, a in (("ts", "时间", 128, "w"), ("issue", "期号", 100, "w"),
+                           ("chat", "会话", 118, "w"),
+                           ("who", "发送人", 86, "w"), ("text", "原文", 300, "w"),
+                           ("nums", "号码", 56, "e"), ("amt", "本单", 74, "e"),
+                           ("grand", "累计", 76, "e"), ("op", "操作", 60, "center")):
+            self.tv_rec.heading(c, text=t)
+            self.tv_rec.column(c, width=w, anchor=a)
+        self.tv_rec.pack(side="left", fill="both", expand=True)
+        self.tv_rec.tag_configure("who", foreground=CLR_BLUE)
+        self.tv_rec.tag_configure("rev", foreground="#9aa0a6")
+        self.tv_rec.bind("<Button-1>", self._on_rec_click)
+
+        # 右侧：总额排序，澳门在上、香港在下；有金额的号全部列出（面板可滚动）
+        rwrap = tk.Frame(body, bg=CLR_BG, width=430)
+        rwrap.pack(side="left", fill="y")
+        rwrap.pack_propagate(False)
+        for mk, title in (("MO", " 澳门 总额排序 "), ("HK", " 香港 总额排序 ")):
+            rp = tk.LabelFrame(rwrap, text=title, font=FONT_B, bg=CLR_BG,
+                               fg="#111827", bd=1, relief="groove")
+            rp.pack(fill="both", expand=True, pady=(0, 6))
+            box = tk.Frame(rp, bg=CLR_BG)
+            box.pack(fill="both", expand=True, padx=5, pady=5)
+            sb = ttk.Scrollbar(box, orient="vertical")
+            tv = ttk.Treeview(box, columns=("rank", "num", "zod", "amt", "share"),
+                              show="headings", yscrollcommand=sb.set)
+            sb.configure(command=tv.yview)
+            sb.pack(side="right", fill="y")
+            tv.pack(side="left", fill="both", expand=True)
+            for c, t, w, a in (("rank", "序", 40, "center"), ("num", "号码", 66, "center"),
+                               ("zod", "生肖", 62, "center"), ("amt", "金额", 96, "e"),
+                               ("share", "占比", 74, "e")):
+                tv.heading(c, text=t)
+                tv.column(c, width=w, anchor=a)
+            tv.tag_configure("hot", foreground=CLR_RED)
+            self.tv_risk[mk] = tv
+
+    def _render_grid(self, market, rows):
+        """12 个生肖各一行：左边生肖名，右边一格格「号码 + 金额」。
+
+        整盘是销毁重建的（Tk 做不了局部刷新），所以先比数值指纹：一模一样的
+        数据直接返回，否则每 5 秒刷一次就是满屏闪烁。
+        """
+        sig = tuple((r["zodiac"],
+                     tuple((c["num"], c["amount"], c["color"]) for c in r["cells"]))
+                    for r in rows)
+        if sig == self._grid_sig.get(market):
+            return
+        self._grid_sig[market] = sig
+        holder = self.grid_holder.get(market)
+        if holder is None:
+            return
+        if os.environ.get("MSB_DEBUG_REDRAW"):
+            try:
+                import tempfile
+                with open(os.path.join(tempfile.gettempdir(), "msb_redraw.txt"),
+                          "a", encoding="utf-8") as _f:
+                    _f.write("%s grid %s redraw\n" % (time.strftime("%H:%M:%S"), market))
+            except Exception:
+                pass
+        for w in holder.winfo_children():
+            w.destroy()
+        cells_out = self._grid_cells.setdefault(market, [])
+        cells_out.clear()
+        if not rows:
+            tk.Label(holder, text="暂无号码表", font=FONT_S,
+                     bg=CLR_BG, fg=CLR_MUTED).pack(pady=20)
+            return
+        # 用 grid 均分：生肖列固定宽，号码列按「行里最多的那一行」算（马 5 个号），
+        # 4 个号的行第 5 格留空。这样整数列等宽、上下对齐，还能把盘面铺满容器，
+        # 不会像固定格宽那样右边空一大片。
+        ncol = max(len(r["cells"]) for r in rows)
+        self._grid_rows[market] = len(rows)
+        holder.grid_columnconfigure(0, weight=0, minsize=52)
+        for c in range(ncol):
+            holder.grid_columnconfigure(c + 1, weight=1, uniform="cell")
+        for r in range(len(rows)):
+            holder.grid_rowconfigure(r, weight=1, uniform="row")
+        for r, row in enumerate(rows):
+            tk.Label(holder, text=row["zodiac"], font=FONT_CELL, width=2,
+                     bg="#eaeef2", fg="#4a5463", relief="solid", bd=1,
+                     ).grid(row=r, column=0, sticky="nsew", padx=(0, 1), pady=1)
+            for c in range(ncol):
+                cell = row["cells"][c] if c < len(row["cells"]) else None
+                if not cell:
+                    tk.Frame(holder, bg=CLR_BG).grid(row=r, column=c + 1, sticky="nsew")
+                    continue
+                color = cell["color"]
+                bg = {"红波": CLR_RED, "蓝波": CLR_BLUE2, "绿波": CLR_GREEN}.get(color, CLR_GREY)
+                f = tk.Frame(holder, bg="#fafbfc", highlightbackground="#e3e7ec",
+                             highlightthickness=1)
+                f.grid(row=r, column=c + 1, sticky="nsew", padx=1, pady=1)
+                num = tk.Label(f, text=cell["num"], font=FONT_NUM, bg=bg, fg="white",
+                               relief="flat")
+                num.pack(side="left", padx=(5, 6))
+                # 0 元留空而不是写个「0」：一屏 12 行 × 4 格全是 0，数字会把真正
+                # 有注的号码埋掉。
+                amt = tk.Label(f, text=fmt_money(cell["amount"]) if cell["amount"] else "",
+                               font=FONT_AMT, bg="#fafbfc", fg="#111827", anchor="w")
+                amt.pack(side="left")
+                cells_out.append((num, amt))
+        # 画完立刻按当前尺寸定一次字号，再把缩放事件挂上
+        holder.bind("<Configure>", lambda _e, mk=market: self._rescale_grid(mk))
+        self._rescale_grid(market)
+
+    def _rescale_grid(self, market):
+        """按格子实际高度重算号码盘字号。
+
+        字号太小就变成一坨看不清的方块，太大又会被格子裁掉。行高撑得住
+        15 号，就还它 15 号；窗口缩小、行高掉下来，字号跟着降，最低到 8 号。
+        只在字号真的变了的时候才批量改字体，避免每次 Configure 都重排。
+        """
+        holder = self.grid_holder.get(market)
+        cells = self._grid_cells.get(market) or []
+        rows_n = int(self._grid_rows.get(market) or 0)
+        if holder is None or not cells or rows_n <= 0:
+            return
+        h = holder.winfo_height()
+        w = holder.winfo_width()
+        if h < 20 or w < 20:
+            return                      # 还没排完版，等下一条 Configure
+        cell_h = h / float(rows_n)
+        cell_w = w / (max(1, len(cells) // rows_n) + 1.0)
+        # 行高决定字号上限，列宽再压一道：一格要同时放「01」和「100」
+        by_h = cell_h * 0.62
+        by_w = cell_w * 0.30
+        # 下限给到 10 号：再小就只剩一团糊，宁可让格子自己裁一点也不缩到看不清
+        size = int(max(10, min(15, min(by_h, by_w))))
+        if size == self._grid_font.get(market):
+            return
+        self._grid_font[market] = size
+        num_font = ("Consolas", size, "bold")
+        amt_font = ("Consolas", max(9, size - 1))
+        zod_font = ("Microsoft YaHei UI", max(9, size - 2), "bold")
+        for num, amt in cells:
+            try:
+                num.configure(font=num_font, padx=3 if size < 11 else 5)
+                amt.configure(font=amt_font)
+            except Exception:
+                pass
+        for child in holder.winfo_children():
+            if isinstance(child, tk.Label):
+                try:
+                    child.configure(font=zod_font)
+                except Exception:
+                    pass
+
+    # ---------- 监听对象 ----------
+    # ---------- 配置 ----------
+    def _build_tab_cfg(self, tab):
+        # 125% 缩放的笔记本上窗口高度有限，配置项一多底部就被裁，
+        # 所以整页放进可滚动 Canvas：宁可多滚一下，也不让字段够不着。
+        holder = tk.Frame(tab, bg=CLR_BG)
+        holder.pack(fill="both", expand=True)
+        canvas = tk.Canvas(holder, bg=CLR_BG, highlightthickness=0)
+        vsb = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        wrap = tk.Frame(canvas, bg=CLR_BG)
+        win = canvas.create_window((0, 10), window=wrap, anchor="nw")
+        wrap.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(win, width=max(1, e.width - 8)))
+
+        def _wheel(e):
+            if wrap.winfo_reqheight() <= canvas.winfo_height():
+                return
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+        canvas.bind_all("<MouseWheel>", _wheel)
+
+        def group(title):
+            g = tk.LabelFrame(wrap, text=" %s " % title, font=FONT_B, bg=CLR_BG,
+                              fg="#111827", bd=1, relief="groove")
+            g.pack(fill="x", pady=(0, 10))
+            return g
+
+        g1 = group("采集端与验签")
+        self.v_secret = self._row(g1, "推送密钥", "wx_push_secret",
+                                  "白名单为空时才用到它。名单一旦有条目，服务端只认名单里的密钥", 0,
+                                  secret=True)
+        self.v_port = self._row(g1, "端口", "port",
+                                "默认 8899。改完要停止再启动才生效；采集端的推送地址也要跟着改", 1)
+        tip = tk.Label(g1, text="接几个采集端、各自用哪把密钥，都在「白名单」页里管；"
+                                "签发授权时会自动写进去，不用在这里填。",
+                       font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left")
+        tip.pack(fill="x", padx=14, pady=(0, 10))
+
+        g2 = group("大模型（AI 解析）")
+        self.v_key = self._row(g2, "API Key", "llm_api_key",
+                               "填你自己的大模型 Key（阿里云百炼 / 任意 OpenAI 兼容端点）", 0,
+                               secret=True)
+        self.v_base = self._row(g2, "接口地址", "llm_base_url",
+                                "兼容 OpenAI 协议的 /v1 地址，一般不用改", 1)
+        self.v_model = self._row(g2, "模型名", "llm_model",
+                                 "默认 qwen3.8-27b；换成别的模型名也行", 2)
+        row = tk.Frame(g2, bg=CLR_BG)
+        row.pack(fill="x", pady=4, padx=8)
+        tk.Label(row, text="思考模式", font=FONT, bg=CLR_BG, fg="#374151",
+                 width=12, anchor="w").pack(side="left")
+        self.v_think = tk.BooleanVar(value=bool(int(self.cfg.get("llm_thinking") or 0)))
+        tk.Checkbutton(row, text="开启（慢但更啰嗦；实测关掉更快更准）", variable=self.v_think,
+                       font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, activebackground=CLR_BG,
+                       selectcolor=CLR_BG).pack(side="left")
+
+        tk.Label(wrap, text="改完点左下「保存配置」（本页底部按钮条）；"
+                            "正在跑的服务要「停止 → 启动」才会用上新配置。",
+                 font=FONT_S, bg=CLR_BG, fg=CLR_MUTED).pack(anchor="w", pady=(2, 0))
+        tk.Button(wrap, text="保存配置", font=FONT_B, bg=CLR_BLUE, fg="white",
+                  relief="flat", bd=0, cursor="hand2", command=self.save_cfg, width=14
+                  ).pack(anchor="w", pady=(10, 0))
+
+    def _row(self, parent, label, key, hint, idx, secret=False):
+        row = tk.Frame(parent, bg=CLR_BG)
+        row.pack(fill="x", pady=(4, 0), padx=8)
+        tk.Label(row, text=label, font=FONT, bg=CLR_BG, fg="#374151",
+                 width=12, anchor="w").pack(side="left")
+        var = tk.StringVar(value=str(self.cfg.get(key, DEFAULTS.get(key, "")) or ""))
+        ent = tk.Entry(row, textvariable=var, font=FONT, relief="solid", bd=1,
+                       highlightthickness=0, width=56)
+        if secret:
+            # 密钥类一律打码：截图、录屏、客户在旁边看着的时候不至于整串
+            # 漏出去。旁边给个按钮，需要核对时才临时显示。
+            ent.configure(show="*")
+
+        def _toggle(entry=ent, button=None):
+            if entry.cget("show"):
+                entry.configure(show="")
+                button.configure(text="隐藏")
+            else:
+                entry.configure(show="*")
+                button.configure(text="显示")
+
+        ent.pack(side="left", fill="x", expand=True)
+        var._entry = ent
+        if secret:
+            btn = tk.Button(row, text="显示", font=FONT_S, relief="flat", bd=0,
+                            bg=CLR_BG, fg=CLR_BLUE, cursor="hand2", width=5)
+            btn.configure(command=lambda e=ent, b=btn: _toggle(e, b))
+            btn.pack(side="left", padx=(6, 0))
+        if hint:
+            h = tk.Frame(parent, bg=CLR_BG)
+            h.pack(fill="x", padx=8)
+            tk.Label(h, text=hint, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED,
+                     anchor="w", justify="left").pack(side="left", padx=(100, 0))
+        return var
+
+    # ---------- 日志 ----------
+    def _build_tab_log(self, tab):
+        top = tk.Frame(tab, bg=CLR_BG)
+        top.pack(fill="x", padx=12, pady=(10, 2))
+        self.lb_msg_head = tk.Label(top, text="收到的消息", font=FONT_B, bg=CLR_BG,
+                                    fg="#111827")
+        self.lb_msg_head.pack(side="left")
+        tk.Button(top, text="运行日志", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=self.open_logs
+                  ).pack(side="right", padx=4)
+        tk.Button(top, text="刷新", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=self.refresh_log
+                  ).pack(side="right", padx=4)
+
+        sub = tk.Frame(tab, bg=CLR_BG)
+        sub.pack(fill="x", padx=12, pady=(0, 8))
+        self.lb_msg_sub = tk.Label(sub, text="", font=FONT_S, bg=CLR_BG,
+                                   fg=CLR_MUTED, justify="left")
+        self.lb_msg_sub.pack(side="left")
+        # 消息页也按期看，期别选项和总览页共用一份，数字才对得上
+        tk.Label(sub, text="账期", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED
+                 ).pack(side="left", padx=(12, 0))
+        self.log_scope = ttk.Combobox(sub, state="readonly", width=18, font=FONT_S)
+        self.log_scope.pack(side="left", padx=(4, 0))
+        self.log_scope.bind("<<ComboboxSelected>>", self._on_log_scope)
+
+        body = tk.Frame(tab, bg=CLR_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+
+        cols = (("t", "时间", 130), ("acc", "账号", 108), ("chat", "会话", 160),
+                ("who", "发送人", 84), ("body", "内容", 240), ("res", "结果", 178))
+        tv = ttk.Treeview(body, columns=[c[0] for c in cols], show="headings")
+        for key, title, w in cols:
+            tv.heading(key, text=title)
+            tv.column(key, width=w, anchor="w", stretch=(key == "body"))
+        vsb = ttk.Scrollbar(body, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        tv.tag_configure("odd", background="#fbfcfd")
+        tv.tag_configure("ok", foreground="#2b8a5f")
+        tv.tag_configure("bad", foreground="#c0392b")
+        tv.tag_configure("skip", foreground="#8a8f98")
+        tv.bind("<<TreeviewSelect>>", self._on_msg_select)
+        tv.bind("<Double-1>", self._on_msg_double)
+        self.tv_msg = tv
+        self._msg_sig = None
+        self._msg_mid = {}
+        self._msg_res = {}
+        self._msg_rev = {}
+
+        bar = tk.Frame(tab, bg=CLR_BG)
+        bar.pack(fill="x", padx=12, pady=(0, 10))
+        self.btn_rev = tk.Button(bar, text="撤销选中的这笔账", font=FONT_S,
+                                 bg="#fdecec", fg="#b23b3b", relief="flat", bd=0,
+                                 cursor="hand2", command=self.reverse_selected,
+                                 state="disabled")
+        self.btn_rev.pack(side="left")
+        self.lb_rev_hint = tk.Label(bar, text="选一笔「记账」的行，再点左边按钮",
+                                    font=FONT_S, bg=CLR_BG, fg=CLR_MUTED)
+        self.lb_rev_hint.pack(side="left", padx=10)
+
+    def refresh_log(self, force=False):
+        """按期显示消息流水。内容没变就不重画 —— 5 秒一次重建会闪。"""
+        tv = getattr(self, "tv_msg", None)
+        if tv is None:
+            return
+        rows, meta = [], {}
+        try:
+            s = msb_view.summary(self.acc)
+            picks = self._issue_choices(s)
+            self._issue_opts = picks
+            labels = tuple(p[0] for p in picks)
+            if tuple(self.log_scope["values"] or ()) != labels:
+                self.log_scope["values"] = labels
+                if not self.log_scope.current() >= 0:
+                    self.log_scope.current(0)
+            idx = self.log_scope.current()
+            if idx < 0 or idx >= len(picks):
+                idx = 0
+                self.log_scope.current(0)
+            sel = picks[idx][1] if picks else ""
+        except Exception:
+            sel = ""
+        port = int(getattr(getattr(self, "v_port", None), "get", lambda: "8899")() or 8899)
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/messages?limit=200" % port,
+                headers=api_headers())
+            with urllib.request.urlopen(req, timeout=3) as r:
+                j = json.loads(r.read().decode("utf-8", "replace"))
+            rows = j.get("messages") or []
+            meta = j
+        except Exception:
+            pass
+        self._msg_rows = rows or self._msg_rows
+        # 只留选中这一期的消息：和总览页的未解析数、记账数同一口径
+        if sel:
+            rows = [m for m in rows
+                    if msb_view.stage_of_ts(m.get("ts")) == sel]
+        sig = (sel, len(rows), rows[0].get("ts") if rows else "",
+               rows[0].get("content") if rows else "")
+        if not force and sig == self._msg_sig:
+            return
+        self._msg_sig = sig
+
+        kids = tv.get_children()
+        if kids:
+            tv.delete(*kids)
+        self._msg_mid = {}
+        self._msg_res = {}
+        self._msg_rev = {}
+        for i, m in enumerate(rows):
+            res = str(m.get("result") or "")
+            reason = str(m.get("reason") or "")
+            # 「解析失败，已写入 unparsed.jsonl」这种长句在列里放不下，
+            # 而且客户不需要知道内部文件名，只留前半句
+            if "解析失败" in reason:
+                reason = "解析失败"
+            elif len(reason) > 12:
+                reason = reason[:12] + "…"
+            amt = m.get("amount")
+            if res == "记账":
+                base = "记账" + (" ¥%s" % fmt_money(amt) if amt is not None else "")
+                if m.get("reversed"):
+                    label = "已撤销 · 原 %s" % base
+                    tag = "skip"
+                else:
+                    label = base
+                    tag = "ok"
+            else:
+                label = ("%s · %s" % (res, reason)) if reason else res
+                tag = "bad" if res == "未解析" else "skip"
+            tags = (tag,)
+            if i % 2:
+                tags = tags + ("odd",)
+            iid = str(i)
+            tv.insert("", "end", iid=iid, values=(
+                str(m.get("ts") or ""),
+                str(m.get("account") or m.get("wechat") or ""),
+                str(m.get("chat") or ""),
+                str(m.get("sender") or ""),
+                str(m.get("content") or ""),
+                label,
+            ), tags=tags)
+            self._msg_mid[iid] = str(m.get("msg_id") or "")
+            self._msg_res[iid] = res
+            self._msg_rev[iid] = bool(m.get("reversed"))
+
+        if rows:
+            okn = sum(1 for m in rows if str(m.get("result") or "") == "记账")
+            tst = sum(1 for m in rows if str(m.get("result") or "") == "记账"
+                      and str(m.get("chat") or "") in ("规则测试", "自检"))
+            badn = sum(1 for m in rows if str(m.get("result") or "") == "未解析")
+            skipn = len(rows) - okn - badn
+            self.lb_msg_sub.configure(
+                text="%s · 共 %d 条：记账 %d（测试 %d）/ 未解析 %d / 跳过 %d"
+                     % (sel or "全部", len(rows), okn, tst, badn, skipn),
+                fg=CLR_MUTED)
+        else:
+            self.lb_msg_sub.configure(
+                text="%s 这一期还没有消息。采集端推送一条，这里就会立刻出现。"
+                     "（只留 %s 天，过期自动删）" % (sel or "所选账期",
+                                                   meta.get("keep_days") or 7),
+                fg=CLR_MUTED)
+
+    def _on_log_scope(self, _evt=None):
+        """消息页切账期：强制重画一次。"""
+        self._msg_sig = None
+        self.refresh_log(force=True)
+
+    def _on_msg_select(self, _evt=None):
+        """选中的行决定撤销按钮能不能按 —— 只有活着的「记账」行可以。"""
+        tv = getattr(self, "tv_msg", None)
+        btn = getattr(self, "btn_rev", None)
+        hint = getattr(self, "lb_rev_hint", None)
+        if tv is None or btn is None or hint is None:
+            return
+        sel = tv.selection()
+        if not sel:
+            btn.configure(state="disabled")
+            hint.configure(text="选一笔「记账」的行，再点左边按钮", fg=CLR_MUTED)
+            return
+        iid = sel[0]
+        res = self._msg_res.get(iid) or ""
+        if res != "记账":
+            btn.configure(state="disabled")
+            hint.configure(text="只能撤销「记账」的行", fg=CLR_MUTED)
+            return
+        if self._msg_rev.get(iid):
+            btn.configure(state="disabled")
+            hint.configure(text="这笔已经撤销过了", fg=CLR_MUTED)
+            return
+        btn.configure(state="normal")
+        hint.configure(text="撤销只减这一笔的金额，别的账一分不动", fg="#b23b3b")
+
+    def _on_msg_double(self, _evt=None):
+        btn = getattr(self, "btn_rev", None)
+        if btn is not None and str(btn["state"]) == "normal":
+            self.reverse_selected()
+
+    def reverse_selected(self):
+        """撤销消息页选中的那一笔。"""
+        tv = getattr(self, "tv_msg", None)
+        if tv is None:
+            return
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("撤销这笔账", "先在列表里选一笔「记账」的行",
+                                parent=self.root)
+            return
+        iid = sel[0]
+        mid = self._msg_mid.get(iid) or ""
+        if not mid:
+            messagebox.showinfo("撤销这笔账", "这行没有消息号，撤不了", parent=self.root)
+            return
+        if self._msg_rev.get(iid):
+            messagebox.showinfo("撤销这笔账", "这笔已经撤销过了，不能撤两次",
+                                parent=self.root)
+            return
+        self._reverse_by_msg(mid)
+
+    # ---------- 最近记账：单笔撤销 ----------
+    def _on_rec_click(self, event):
+        """点「操作」那一格就撤这一笔；点别的列只是普通选中，什么都不做。"""
+        tv = getattr(self, "tv_rec", None)
+        if tv is None:
+            return
+        try:
+            if tv.identify_region(event.x, event.y) != "cell":
+                return
+            if tv.identify_column(event.x) != getattr(self, "_rec_op_col", ""):
+                return
+            iid = tv.identify_row(event.y)
+        except Exception:
+            return
+        if not iid:
+            return
+        try:
+            tv.selection_set(iid)
+        except Exception:
+            pass
+        if getattr(self, "_rec_rev", {}).get(iid):
+            messagebox.showinfo("撤销这笔账", "这笔已经撤销过了，不能撤两次",
+                                parent=self.root)
+            return
+        mid = getattr(self, "_rec_mid", {}).get(iid) or ""
+        if not mid:
+            messagebox.showinfo("撤销这笔账", "这行没有消息号，撤不了", parent=self.root)
+            return
+        self._reverse_by_msg(mid)
+
+    def _reverse_by_msg(self, mid):
+        """拉明细给人看清楚要减什么 → 确认 → 调 /api/reverse → 刷新。
+
+        消息页和最近记账共用这一套，免得两处算出不一样的提示。
+        """
+        port = int(getattr(getattr(self, "v_port", None), "get", lambda: "8899")() or 8899)
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/record?msg_id=%s"
+                % (port, urllib.parse.quote(mid, safe="")),
+                headers=api_headers())
+            with urllib.request.urlopen(req, timeout=5) as r:
+                j = json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError:
+            messagebox.showwarning("撤销这笔账", "找不到这笔账（可能流水已经清理）",
+                                   parent=self.root)
+            return False
+        except Exception as e:
+            messagebox.showerror("撤销这笔账", "读不到明细：%r" % (e,), parent=self.root)
+            return False
+
+        if not j.get("has_detail"):
+            messagebox.showwarning(
+                "撤销这笔账",
+                "这笔是旧版本记的账，没存号码明细，算不出该减哪几个号。\n"
+                "不拿「金额前 10」猜着减 —— 猜错比不改更糟。请手工改账本。",
+                parent=self.root)
+            return False
+
+        ap = j.get("applied") or {}
+        items = "、".join("%s ¥%s" % (k, fmt_money(v)) for k, v in sorted(ap.items()))
+        total = j.get("total")
+        body = ("原文：%s\n\n"
+                "当时记账：%s\n"
+                "合计：¥%s\n\n"
+                "撤销只把这 %d 个号各减回去，别的账一分不动。\n"
+                "账本总额会减 ¥%s。\n\n确定撤销吗？"
+                % (j.get("text") or "", items, fmt_money(total),
+                   len(ap), fmt_money(total)))
+        if not messagebox.askyesno("撤销这笔账", body, parent=self.root):
+            return False
+
+        res = api_post("/api/reverse", {"msg_id": mid, "note": "控制台撤销"}, port=port)
+        if not res.get("ok"):
+            messagebox.showerror("撤销这笔账", res.get("error") or "撤销失败",
+                                 parent=self.root)
+            return False
+
+        self._msg_sig = None
+        self._rec_sig = None
+        self.refresh_log(force=True)
+        try:
+            self.refresh_overview()
+        except Exception:
+            pass
+        messagebox.showinfo(
+            "撤销完成",
+            "已撤销 ¥%s，账本总额现在 ¥%s"
+            % (fmt_money(abs(res.get("total") or 0)), fmt_money(res.get("grand_total"))),
+            parent=self.root)
+        return True
+
+    # ---------- 白名单 ----------
+    def _build_tab_white(self, tab):
+        top = tk.Frame(tab, bg=CLR_BG)
+        top.pack(fill="x", padx=12, pady=(10, 2))
+        self.lb_wl_mode = tk.Label(top, text="…", font=FONT_B, bg=CLR_BG, fg="#111827")
+        self.lb_wl_mode.pack(side="left")
+        tk.Button(top, text="打开文件", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=self._white_open
+                  ).pack(side="right", padx=4)
+        tk.Button(top, text="刷新", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=self.refresh_white
+                  ).pack(side="right", padx=4)
+
+        sub = tk.Frame(tab, bg=CLR_BG)
+        sub.pack(fill="x", padx=12, pady=(0, 8))
+        self.lb_wl_sub = tk.Label(sub, text="", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED)
+        self.lb_wl_sub.pack(side="left")
+
+        body = tk.Frame(tab, bg=CLR_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        cols = ("wid", "cust", "secret", "expire", "last", "state")
+        heads = {"wid": "微信号", "cust": "客户", "secret": "密钥",
+                 "expire": "有效期至", "last": "最后推送", "state": "状态"}
+        widths = {"wid": 150, "cust": 100, "secret": 150, "expire": 100,
+                  "last": 140, "state": 80}
+        self.tv_wl = ttk.Treeview(body, columns=cols, show="headings", height=12)
+        for c in cols:
+            self.tv_wl.heading(c, text=heads[c])
+            self.tv_wl.column(c, width=widths[c],
+                              anchor="w" if c in ("wid", "cust", "secret", "last") else "center")
+        vsb = ttk.Scrollbar(body, orient="vertical", command=self.tv_wl.yview)
+        self.tv_wl.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.tv_wl.pack(side="left", fill="both", expand=True)
+        self.tv_wl.tag_configure("off", foreground=CLR_GREY)
+        self.tv_wl.tag_configure("on", foreground="#111827")
+
+        foot = tk.Frame(tab, bg=CLR_BG)
+        foot.pack(fill="x", padx=12, pady=(0, 10))
+
+        def mk(text, cmd, bg, fg):
+            return tk.Button(foot, text=text, font=FONT_S, bg=bg, fg=fg,
+                             relief="flat", bd=0, cursor="hand2", command=cmd)
+
+        mk("启用", lambda: self._white_set(True), "#eef7f1", CLR_GREEN
+           ).pack(side="left", padx=(0, 6))
+        mk("停用", lambda: self._white_set(False), "#fdf4f3", CLR_RED
+           ).pack(side="left", padx=(0, 6))
+        mk("删除", self._white_delete, "#fdf4f3", CLR_RED).pack(side="left")
+        self.lb_wl_tip = tk.Label(foot, text="", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED)
+        self.lb_wl_tip.pack(side="right")
+
+        self.tv_wl.bind("<Double-1>", lambda e: self._white_set(None))
+        self.refresh_white()
+
+    def _read_white(self) -> dict:
+        """直接读文件，不依赖服务在跑 —— 服务没启动也得能看名单。"""
+        if not WHITELIST_PATH.exists():
+            return {"updated_at": "", "clients": []}
+        try:
+            with open(WHITELIST_PATH, "r", encoding="utf-8-sig") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {"updated_at": "", "clients": []}
+        except Exception as e:
+            self._toast("白名单文件读不出来：%r" % (e,))
+            return {"updated_at": "", "clients": []}
+
+    def _white_enabled_count(self) -> int:
+        d = self._read_white()
+        return sum(1 for x in (d.get("clients") or [])
+                   if isinstance(x, dict) and x.get("enabled", True))
+
+    def _write_white(self, doc: dict) -> bool:
+        """原子写：服务端按 mtime 热加载，改完下一次请求就生效，不用重启。"""
+        try:
+            WHITELIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = str(WHITELIST_PATH) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp, str(WHITELIST_PATH))
+            return True
+        except Exception as e:
+            self._toast("写白名单失败：%r" % (e,))
+            return False
+
+    def refresh_white(self, keep: str = ""):
+        doc = self._read_white()
+        rows = [x for x in (doc.get("clients") or []) if isinstance(x, dict)]
+        en = sum(1 for x in rows if x.get("enabled", True))
+        # 服务在跑就顺手补"最后推送"，读不到就算了
+        last = {}
+        port = int(getattr(getattr(self, "v_port", None), "get", lambda: "8899")() or 8899)
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/clients" % port, headers=api_headers())
+            with urllib.request.urlopen(req, timeout=2) as r:
+                j = json.loads(r.read().decode("utf-8", "replace"))
+                for c in (j.get("clients") or []):
+                    last[c.get("wechat_id")] = c.get("last_push") or ""
+        except Exception:
+            pass
+
+        self.tv_wl.delete(*self.tv_wl.get_children())
+        row_ids = {}
+        for x in rows:
+            sec = str(x.get("secret") or "")
+            masked = (sec[:6] + "…" + sec[-5:]) if len(sec) > 12 else "…"
+            on = bool(x.get("enabled", True))
+            iid = self.tv_wl.insert("", "end", values=(
+                x.get("wechat_id") or "", x.get("customer_id") or "-",
+                masked, x.get("expire_at") or "-",
+                last.get(x.get("wechat_id")) or "-",
+                "● 启用" if on else "○ 已停用",
+            ), tags=("on" if on else "off",))
+            row_ids[str(x.get("wechat_id") or "")] = iid
+        if keep and keep in row_ids:                 # 操作完把选中还回去
+            self.tv_wl.selection_set(row_ids[keep])
+            self.tv_wl.focus(row_ids[keep])
+
+        # 三态必须分开说，否则"全停用"会被误读成"兼容模式全放行"
+        if en:
+            self.lb_wl_mode.configure(text="严格模式：只接收名单内的采集端", fg=CLR_GREEN)
+        elif rows:
+            self.lb_wl_mode.configure(
+                text="名单里的采集端全部已停用：一律拒收", fg=CLR_RED)
+        else:
+            self.lb_wl_mode.configure(
+                text="兼容模式：名单是空的，还在用配置页那把密钥", fg="#b5651d")
+        upd = doc.get("updated_at") or "—"
+        self.lb_wl_sub.configure(
+            text="白名单 %d 个 · 启用 %d 个 · 最后更新 %s" % (len(rows), en, upd))
+        if en:
+            tip = "签发授权后这里自动出现；停用即刻生效，不用重启"
+        elif rows:
+            tip = "全部停用中，采集端现在推什么都收不到"
+        else:
+            tip = "去厂商授权工具签发一次，就会自动写进来"
+        self.lb_wl_tip.configure(text=tip)
+
+    def _white_sel(self):
+        sel = self.tv_wl.selection()
+        if not sel:
+            self._toast("先在表格里选一行")
+            return None
+        return self.tv_wl.item(sel[0], "values")[0]
+
+    def _white_set(self, on):
+        wid = self._white_sel()
+        if not wid:
+            return
+        doc = self._read_white()
+        for x in (doc.get("clients") or []):
+            if str(x.get("wechat_id") or "") == str(wid):
+                new = (not bool(x.get("enabled", True))) if on is None else bool(on)
+                x["enabled"] = new
+                tip = "已启用 %s" % wid if new else "已停用 %s（这个号的推送立刻会被拒）" % wid
+                break
+        else:
+            return
+        doc["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if self._write_white(doc):
+            self.refresh_white(keep=wid)
+            self._toast(tip)
+
+    def _white_delete(self):
+        wid = self._white_sel()
+        if not wid:
+            return
+        if not messagebox.askyesno("删除", "把 %s 从白名单里删掉？\n\n"
+                                       "删掉后这个号的推送会被直接拒绝，不会记进账本。" % wid):
+            return
+        doc = self._read_white()
+        doc["clients"] = [x for x in (doc.get("clients") or [])
+                          if str(x.get("wechat_id") or "") != str(wid)]
+        doc["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if self._write_white(doc):
+            self.refresh_white()
+            self._toast("已删除 %s" % wid)
+
+    def _white_open(self):
+        if not WHITELIST_PATH.exists():
+            self._toast("还没有白名单文件，签发一次授权就会生成")
+            return
+        os.startfile(str(WHITELIST_PATH))
+
+    # ---- 状态刷新 ----
+    def _on_tab(self, event=None):
+        idx = self.nb.current()
+        if idx == 0:
+            self.refresh_overview()
+        elif idx == 2:
+            self.refresh_white()
+        elif idx == 3:
+            self.refresh_log()
+
+    def _on_acc_change(self, event=None):
+        v = (self.acc_var.get() or "").strip()
+        self.acc = "" if v.startswith("全部账号") else v
+        self.refresh_overview()
+
+    def _sync_accounts(self):
+        """账号下拉：账号变了才重建选项，避免每次刷新都把用户的选择冲掉。
+
+        「全部账号（合计）」永远在第一位、默认选中 —— 只有一个采集端时也不隐藏，
+        这样看到的默认口径就是全部数据合计，切单号只是下钻。
+        """
+        accs = msb_view.all_accounts()
+        sig = tuple(accs)
+        if sig != self._acc_sig:
+            self._acc_sig = sig
+            self.acc_sel.configure(values=["全部账号（合计）"] + list(accs))
+            if self.acc and self.acc not in accs:
+                self.acc = ""
+            self.acc_var.set(self.acc or "全部账号（合计）")
+        elif not self.acc_var.get():
+            self.acc_var.set(self.acc or "全部账号（合计）")
+
+    def refresh_overview(self):
+        try:
+            s = msb_view.summary(self.acc)
+        except Exception as e:
+            self.lb_grand.configure(text="—")
+            self._toast("读数据出错：%r" % (e,))
+            return
+        self._sync_accounts()
+        self.lb_grand.configure(text=fmt_money(s["grand_total"]))
+        banks = s.get("markets") or {}
+        self.lb_mo.configure(text=fmt_money((banks.get("MO") or {}).get("total") or 0))
+        self.lb_hk.configure(text=fmt_money((banks.get("HK") or {}).get("total") or 0))
+        self.lb_issue.configure(text="%s 期" % s.get("issue", "—"))
+        self.lb_zyear.configure(text="%s年 · %s" % (s["zodiac_year"], s["zodiac"]))
+        self.lb_kbets.configure(text=str(s["numbers_with_bets"]))
+        self.lb_flat.configure(text=fmt_money(s.get("flat_total") or 0))
+        self.lb_krec.configure(text=str(s["records_today"]))
+        cur_issue = str(s.get("issue") or "")
+
+        # 期别选择：本期 / 前一期 / 前二期，都是具体日期，选中哪期就看哪期
+        picks = self._issue_choices(s)
+        self._issue_opts = picks
+        labels = tuple(p[0] for p in picks)
+        if tuple(self.rec_scope["values"] or ()) != labels:
+            self.rec_scope["values"] = labels
+            self.rec_scope.current(0)
+        idx = self.rec_scope.current()
+        if idx < 0 or idx >= len(picks):
+            idx = 0
+            self.rec_scope.current(0)
+        sel = picks[idx][1] if picks else cur_issue
+
+        # 消息流水是「消息」页和这里共用的事实源，两边数字才对得上。
+        # 拉不到（服务端没起）就退回本地文件口径，不让界面空着。
+        self._msg_rows = self._fetch_messages()
+        mine = [m for m in self._msg_rows
+                if msb_view.stage_of_ts(m.get("ts")) == sel]
+        msg_ok = sum(1 for m in mine if str(m.get("result") or "") == "记账")
+        msg_rev = sum(1 for m in mine if str(m.get("result") or "") == "记账"
+                      and m.get("reversed"))
+        # 规则测试（selftest 打进去的假消息）不该算进业务笔数，单列出来
+        msg_test = sum(1 for m in mine if str(m.get("result") or "") == "记账"
+                       and str(m.get("chat") or "") in ("规则测试", "自检"))
+        unp_n = sum(1 for m in mine if str(m.get("result") or "") == "未解析")
+        if not self._msg_rows:
+            unp_n = (int(s.get("unparsed_current") or 0) if sel == cur_issue else
+                     sum(1 for x in s["unparsed"]
+                         if str(x.get("issue") or "") == sel))
+        self.lb_kunp.configure(text=str(unp_n))
+        self.btn_unp.configure(text="未解析 %d" % unp_n)
+
+        # 两本号码盘同时画，左澳门右香港
+        grids = s.get("grids") or {}
+        self._render_grid("MO", grids.get("MO") or [])
+        self._render_grid("HK", grids.get("HK") or [])
+
+        # 两本风险榜：澳门在上、香港在下，有金额的号全部列出
+        risks = s.get("risks") or {}
+        for mk in ("MO", "HK"):
+            rows = risks.get(mk) or []
+            risk_sig = tuple((x["rank"], x["num"], x["zodiac"], x["amount"], x["share"])
+                             for x in rows)
+            if risk_sig == self._risk_sig.get(mk):
+                continue
+            self._risk_sig[mk] = risk_sig
+            tv = self.tv_risk.get(mk)
+            if tv is None:
+                continue
+            for row in tv.get_children():
+                tv.delete(row)
+            for x in rows:
+                tv.insert("", "end",
+                          values=(x["rank"], x["num"], x["zodiac"],
+                                  fmt_money(x["amount"]), "%s%%" % x["share"]),
+                          tags=("hot",) if x["rank"] == 1 else ())
+
+        # 最近记账：只显示选中的那一期。手工记账不在消息流水里（消息页看不到），
+        # 所以提示里把两边条数摆出来：消息记账 N 笔 / 账目 M 笔（含手工 K 笔）。
+        all_rec = s["recent"]
+        rec_rows = [x for x in all_rec if str(x.get("issue") or "") == sel]
+        manual_n = sum(1 for x in rec_rows
+                       if str(x.get("sender") or "") == "manual"
+                       or str(x.get("chat") or x.get("chat_name") or "") == "手工记账")
+        if getattr(self, "lb_rec_hint", None) is not None:
+            self.lb_rec_hint.configure(
+                text="%s · 消息记账 %d 笔（测试 %d · 已撤 %d）· 账目 %d 笔（手工 %d）"
+                     % (sel or "—", msg_ok, msg_test, msg_rev, len(rec_rows), manual_n))
+
+        rec_sig = (sel, tuple((str(x.get("ts") or ""), str(x.get("issue") or ""),
+                                   str(x.get("chat") or x.get("chat_name") or ""),
+                                   str(x.get("sender_name") or x.get("sender") or ""),
+                                   str(x.get("text") or ""), x.get("numbers") or 0,
+                                   x.get("total") or 0, x.get("grand_total") or 0,
+                                   bool(x.get("reversed")))
+                                  for x in rec_rows))
+        if rec_sig != self._rec_sig:
+            self._rec_sig = rec_sig
+            for row in self.tv_rec.get_children():
+                self.tv_rec.delete(row)
+            self._rec_mid = {}
+            self._rec_rev = {}
+            for x in rec_rows:
+                rev = bool(x.get("reversed"))
+                iid = self.tv_rec.insert("", "end", values=(
+                    str(x.get("ts") or "")[:16],
+                    str(x.get("issue") or ""),
+                    str(x.get("chat") or x.get("chat_name") or "")[:24],
+                    str(x.get("sender_name") or x.get("sender") or "")[:14],
+                    str(x.get("text") or "")[:70],
+                    x.get("numbers") or 0,
+                    fmt_money(x.get("total")),
+                    fmt_money(x.get("grand_total")),
+                    "已撤销" if rev else "撤销",
+                ), tags=("who",) if not rev else ("who", "rev"))
+                self._rec_mid[iid] = str(x.get("msg_id") or "")
+                self._rec_rev[iid] = rev
+
+    def _fetch_messages(self, limit=500):
+        """拉最近的消息流水。总览和「消息」页共用这一份，计数才对得上。"""
+        port = int(getattr(getattr(self, "v_port", None), "get", lambda: "8899")() or 8899)
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/messages?limit=%d" % (port, limit),
+                headers=api_headers())
+            with urllib.request.urlopen(req, timeout=3) as r:
+                j = json.loads(r.read().decode("utf-8", "replace"))
+            return j.get("messages") or []
+        except Exception:
+            return []
+
+    def _issue_choices(self, s):
+        """可选账期：本期 + 已归档的前两期。返回 [(显示文本, 期号)]。
+
+        显示文本带日期，用户要的是「本期是哪天 / 上一期是哪天」，而不是
+        「最近 3 期」这种对数不方便的说法。
+        """
+        cur = str(s.get("issue") or "")
+        opts = [("本期 %s" % cur, cur)] if cur else []
+        arch = []
+        try:
+            # 合计视图下 self.acc 是空的，得把所有账号的归档期并起来
+            accs = [self.acc] if self.acc else msb_view.all_accounts()
+            for a in accs:
+                arch += [p.stem for p in msb_view.issue_files(a)]
+        except Exception:
+            arch = []
+        arch = sorted(set(arch), reverse=True)
+        rest = [a for a in arch if a and a != cur][:2]
+        for i, iss in enumerate(rest):
+            opts.append(("%s %s" % ("前一期" if i == 0 else "前二期", iss), iss))
+        return opts
+
+    def _on_rec_scope(self, _evt=None):
+        """切账期：指纹清掉，强制按新期重画一次。"""
+        self._rec_sig = None
+        self.refresh_overview()
+        self.refresh_log(force=True)
+
+    def _paint_run(self, running: bool):
+        """主按钮跟着状态换字换色：在跑就显示「停止服务」，红字浅底。"""
+        b = getattr(self, "btn_run", None)
+        if b is None:
+            return
+        try:
+            if running:
+                b.configure(text="停止服务", bg="#fdf4f3", fg=CLR_RED,
+                            activebackground="#fbeae8", activeforeground=CLR_RED)
+            else:
+                b.configure(text="启动服务", bg=CLR_BLUE, fg="white",
+                            activebackground=CLR_BLUE, activeforeground="white")
+        except Exception:
+            pass
+
+    def _refresh_status(self):
+        try:
+            port = int(self.v_port.get() or 8899)
+        except ValueError:
+            port = 8899
+        ok, why = health(port)
+        if ok:
+            self.lb_state.configure(text="● 运行中", fg=CLR_OK)
+            self.lb_hint.configure(text="服务端在 %d 端口等着采集端推送" % port)
+            self._paint_run(True)
+        else:
+            pid = running_pid()
+            if pid and _pid_alive(pid):
+                self.lb_state.configure(text="● 启动中", fg="#b8860b")
+                self.lb_hint.configure(text="进程在，但端口还没响应（前几秒正常）")
+                self._paint_run(True)
+            else:
+                self.lb_state.configure(text="● 未运行", fg=CLR_BAD)
+                self.lb_hint.configure(text='点左下「启动服务」；窗口关掉不影响后台')
+                self._paint_run(False)
+        self.lb_port.configure(text=str(port))
+        self.lb_dash.configure(text="http://127.0.0.1:%d/" % port)
+        try:
+            s = msb_view.summary("")
+            self.lb_sum.configure(text="%d 个 / %s 元 / 今日 %d 笔" % (
+                len(s["accounts"]), fmt_money(s["grand_total"]), s["records_today"]))
+        except Exception:
+            self.lb_sum.configure(text="—")
+
+    def _loop(self):
+        self.root.after(5000, self._loop)
+        try:
+            self._refresh_status()
+            # 只在当前页自动刷，别把别页的选中/滚动冲掉
+            try:
+                cur = self.nb.current()
+                if cur == 0:
+                    self.refresh_overview()
+                elif cur == 3:
+                    self.refresh_log()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # ---- 动作 ----
+    def show_unparsed(self):
+        # 和「消息」页、顶部数字同一个来源：消息流水里 result=未解析 的那些，
+        # 再按当前选中的账期过滤，三处数就一致了。
+        s = msb_view.summary(self.acc)
+        picks = self._issue_opts or self._issue_choices(s)
+        idx = self.rec_scope.current()
+        sel = picks[idx][1] if (picks and 0 <= idx < len(picks)) else str(s.get("issue") or "")
+        if not self._msg_rows:
+            self._msg_rows = self._fetch_messages()
+        rows = [m for m in self._msg_rows
+                if str(m.get("result") or "") == "未解析"
+                and msb_view.stage_of_ts(m.get("ts")) == sel]
+        if not rows and not self._msg_rows:
+            rows = [x for x in s["unparsed"]
+                    if str(x.get("issue") or "") == sel]
+        win = tk.Toplevel(self.root)
+        win.title("未解析 %s · %d 条（需人工核对）" % (sel or "—", len(rows)))
+        win.configure(bg=CLR_BG)
+        win.geometry("860x440")
+        tk.Label(win, text="账期 %s 没解析出来的消息，原文同时留在 unparsed.jsonl 里。"
+                          % (sel or "—"),
+                 font=FONT_S, bg=CLR_BG, fg=CLR_MUTED).pack(anchor="w", padx=12, pady=(10, 4))
+        body = tk.Frame(win, bg=CLR_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        cols = ("ts", "chat", "who", "text", "reason")
+        tv = ttk.Treeview(body, columns=cols, show="headings")
+        for c, t, w, a in (("ts", "时间", 130, "w"), ("chat", "会话", 150, "w"),
+                           ("who", "发送人", 100, "w"),
+                           ("text", "原文", 340, "w"), ("reason", "原因", 160, "w")):
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor=a)
+        vsb = ttk.Scrollbar(body, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        if not rows:
+            tv.insert("", "end", values=("—", "—", "—", "这一期没有未解析的单", "—"))
+        for x in rows:
+            tv.insert("", "end", values=(str(x.get("ts") or "")[:16],
+                                         str(x.get("chat") or x.get("chat_name") or "")[:20],
+                                         str(x.get("sender") or "")[:12],
+                                         str(x.get("content") or x.get("text") or "")[:80],
+                                         str(x.get("reason") or "")[:40]))
+
+    def save_cfg(self):
+        try:
+            port = int(self.v_port.get() or 8899)
+            if not (1 <= port <= 65535):
+                raise ValueError("端口要在 1~65535 之间")
+        except ValueError as e:
+            messagebox.showerror("端口填错了", str(e))
+            return
+        # wx_account_secrets 不在这里改：它已经被「白名单」页接管，
+        # 原值原样写回，免得老配置被别人一次保存就清空。
+        old = read_cfg()
+        write_cfg({
+            "port": port,
+            "wx_push_secret": self.v_secret.get().strip(),
+            "wx_account_secrets": str(old.get("wx_account_secrets") or ""),
+            "llm_api_key": self.v_key.get().strip(),
+            "llm_base_url": self.v_base.get().strip(),
+            "llm_model": self.v_model.get().strip(),
+            "llm_thinking": 1 if self.v_think.get() else 0,
+        })
+        self.cfg = read_cfg()
+        self._toast("配置已保存（正在跑的服务要停止再启动才生效）")
+
+    def toggle_server(self):
+        """一个按钮管启动和停止：现在在跑就停，没跑就起。"""
+        try:
+            port = int(self.v_port.get() or 8899)
+        except ValueError:
+            port = 8899
+        ok, _ = health(port)
+        pid = running_pid()
+        if ok or (pid and _pid_alive(pid)):
+            self.stop_server()
+        else:
+            self.start_server()
+
+    def start_server(self):
+        port = int(self.v_port.get() or 8899)
+        if health(port)[0]:
+            messagebox.showinfo("已经在跑", "服务端已经在 %d 端口运行了，不用重复启动。" % port)
+            return
+        pid = running_pid()
+        if pid and _pid_alive(pid):
+            messagebox.showinfo("正在启动", "已经有一个启动中的进程（PID %d），等几秒再看。" % pid)
+            return
+        missing = []
+        if not self.v_key.get().strip():
+            missing.append("大模型 API Key")
+        # 白名单有条目就不需要全局密钥了；否则还得填一把，不然一个号都收不进来
+        wl_ok = self._white_enabled_count() > 0
+        if not wl_ok and not self.v_secret.get().strip():
+            missing.append("推送密钥（或者先在「白名单」页加一个采集端）")
+        if missing:
+            messagebox.showerror("配置还没填",
+                                 "缺这些必填项，服务起不来：\n\n  · " + "\n  · ".join(missing) +
+                                 "\n\n先在本页填好，点「保存配置」。")
+            return
+
+        cmd = self_cmd() + ["--headless", "--quiet"]
+        log_dir = msb_view.logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        out = open(log_dir / ("console_%s.log" % time.strftime("%Y%m%d")), "a",
+                   encoding="utf-8")
+        try:
+            self._proc = subprocess.Popen(cmd, cwd=str(app_dir()),
+                                          stdout=out, stderr=subprocess.STDOUT,
+                                          creationflags=0x08000000)   # 不弹黑窗
+        except Exception as e:
+            messagebox.showerror("启动失败", "拉不起后台服务：\n\n%r" % (e,))
+            return
+        try:
+            pid_path().parent.mkdir(parents=True, exist_ok=True)
+            pid_path().write_text(str(self._proc.pid), encoding="utf-8")
+        except Exception:
+            pass
+        self._toast("已启动，正在等端口响应…")
+        self.root.after(1200, self._after_start)
+
+    def _after_start(self):
+        port = int(self.v_port.get() or 8899)
+        if health(port)[0]:
+            self._toast("服务端已就绪：http://127.0.0.1:%d/" % port)
+        else:
+            self._toast("还没响应，稍等几秒；不行就看「日志」页")
+        self._refresh_status()
+
+    def stop_server(self):
+        pid = running_pid()
+        killed = False
+        if pid and _pid_alive(pid):
+            try:
+                # 用内核 API 结束，不拉 taskkill（Windows 11 会闪黑窗）
+                import ctypes
+                k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                h = k32.OpenProcess(0x0001, False, int(pid))   # PROCESS_TERMINATE
+                if h:
+                    k32.TerminateProcess(h, 0)
+                    k32.CloseHandle(h)
+                    killed = True
+            except Exception:
+                pass
+        try:
+            pid_path().unlink()
+        except Exception:
+            pass
+        if killed:
+            self._toast("已停止")
+        else:
+            port = int(self.v_port.get() or 8899)
+            if health(port)[0]:
+                messagebox.showinfo("没找到进程",
+                                    "端口 %d 还有响应，但没找到本窗口启动的进程。\n"
+                                    "可能是别的进程占着，用任务管理器结束 MarkSixBot.exe 即可。" % port)
+            else:
+                self._toast("已经没在跑了")
+        self.root.after(1000, self._refresh_status)
+
+    def do_backup(self):
+        port = int(self.v_port.get() or 8899)
+        if not health(port)[0]:
+            messagebox.showerror("服务没在跑", "备份要通过服务端接口，请先「启动服务」。")
+            return
+        d = api_post("/backup", None, port)
+        if d.get("ok"):
+            self._toast("已备份 %s 个账号的账本" % d.get("count"))
+        else:
+            messagebox.showerror("备份失败", str(d.get("error") or "未知错误"))
+
+    def _recent_chats(self, limit=40):
+        """最近出现过的会话名，给「挂在谁名下」当候选 —— 光有账号不够，
+        得知道这注是谁下的。"""
+        chats = []
+        try:
+            for rec in msb_view.recent_records("", limit):
+                c = str(rec.get("chat") or "").strip()
+                if c and c not in chats:
+                    chats.append(c)
+        except Exception:
+            pass
+        return chats
+
+    def open_manual(self):
+        """打开手工记账窗口：口头单、电话单都从这里进，跟聊天记录无关。"""
+        try:
+            mapping = msb_view.zodiac_year()[2]
+        except Exception as e:
+            self._toast("生肖表读不出来：%r" % (e,))
+            return
+        if not mapping:
+            self._toast("生肖表是空的，先看看日志页有没有报错")
+            return
+        chats = self._recent_chats()
+
+        def _done(notes, chat):
+            total = sum(n["total"] for n in notes)
+            self._toast("界面预览版：%d 注、合计 %s 元 —— 记账逻辑还没接"
+                        % (len(notes), fmt_money(total)))
+
+        ManualBetDialog(self.root, mapping, msb_view.grid_rows(self.acc), chats,
+                        on_submit=_done,
+                        demo=(os.environ.get("MSB_MANUAL") or "") == "2")
+
+    def open_quick(self):
+        """粘文本记账：客户原文只错一个字时，改一下就能记，不用等对方重发。"""
+        QuickBetDialog(self.root, self.acc or "default",
+                       chats=self._recent_chats(), on_done=self.refresh_overview)
+
+    def do_reset(self):
+        """清空账本。选「全部账号（合计）」就清所有账号，选具体号就只清它。
+
+        这里清的是整本账（流水 / 未解析 / 期号 / 归档），不是把号码盘数字抹成 0，
+        所以确认框要把删什么一条条写清楚，清全部再要一次确认。
+        """
+        accs = msb_view.all_accounts()
+        if not accs:
+            messagebox.showinfo("没有账号", "现在还没有任何账号的账本", parent=self.root)
+            return
+        target = self.acc or ""
+        one = bool(target)
+        if one:
+            scope = "账号「%s」" % target
+        else:
+            scope = "全部 %d 个账号（%s）" % (len(accs), "、".join(accs))
+
+        body = ("即将清空 %s。\n\n"
+                "会删掉的：\n"
+                "  · 累计账本 —— 号码盘 49 个号全部归零\n"
+                "  · 记账流水 records.jsonl（撤销和 recalc 都靠它）\n"
+                "  · 未解析队列 unparsed.jsonl\n"
+                "  · 当前期号 current_issue.txt 和历史期归档 issues\\\n\n"
+                "清理前会自动把整份账打包到 backups\\ 留底，但清理本身不可撤销。\n"
+                "会话清单、监听对象配置不受影响。\n\n"
+                "确定清空 %s 吗？" % (scope, scope))
+        if not messagebox.askyesno("确认清空", body, parent=self.root):
+            return
+        if not one:
+            if not messagebox.askyesno(
+                    "再确认一次",
+                    "这次清的是全部 %d 个账号的所有流水，不只是一个号。\n\n真的继续吗？"
+                    % len(accs), parent=self.root):
+                return
+
+        port = int(self.v_port.get() or 8899)
+        if not health(port)[0]:
+            messagebox.showerror("服务没在跑", "清空要通过服务端接口，请先「启动服务」。",
+                                 parent=self.root)
+            return
+        d = api_post("/reset?account=%s" % urllib.parse.quote(target, safe=""), None, port)
+        if d.get("ok"):
+            self._rec_sig = None
+            self._msg_sig = None
+            self._toast("已清空 %d 个账号" % (d.get("count") or 0))
+            self.refresh_overview()
+        else:
+            messagebox.showerror("清空失败", str(d.get("error") or "未知错误"),
+                                 parent=self.root)
+
+    def open_dashboard(self):
+        port = int(self.v_port.get() or 8899)
+        os.startfile("http://127.0.0.1:%d/" % port)
+
+    def open_logs(self):
+        d = msb_view.logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(d))
+
+    def open_data(self):
+        d = data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(d))
+
+    # ---- 开机自启 ----
+    def _autorun_on(self) -> bool:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+                winreg.QueryValueEx(k, "MarkSixBot")
+                return True
+        except Exception:
+            return False
+
+    def toggle_autorun(self):
+        try:
+            import winreg
+            key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
+                if self.v_auto.get():
+                    # 用完整命令行，不能只取 [0]：源码模式下 self_cmd() 是
+                    # [python.exe, main.py]，只取第一个会把 main.py 丢掉。
+                    parts = self_cmd() + ["--headless", "--quiet"]
+                    reg = " ".join('"%s"' % p if (" " in p or not p) else p for p in parts)
+                    winreg.SetValueEx(k, "MarkSixBot", 0, winreg.REG_SZ, reg)
+                    self._toast("已设置开机自动启动（后台静默，无窗口）")
+                else:
+                    try:
+                        winreg.DeleteValue(k, "MarkSixBot")
+                    except Exception:
+                        pass
+                    self._toast("已取消开机自动启动")
+        except Exception as e:
+            messagebox.showerror("设置失败", "改注册表失败：\n\n%r" % (e,))
+            self.v_auto.set(self._autorun_on())
+
+    # ---- 小工具 ----
+    def _toast(self, msg):
+        self.lb_hint.configure(text=msg)
+
+
+def run():
+    root = tk.Tk()
+    try:
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    try:
+        ttk.Style().theme_use("clam")
+    except Exception:
+        pass
+    # 表格默认字体太小，行也矮；放大一档并加高行，右侧排序表读起来清楚
+    try:
+        st = ttk.Style()
+        st.configure("Treeview", font=("Microsoft YaHei UI", 11), rowheight=28)
+        st.configure("Treeview.Heading", font=("Microsoft YaHei UI", 11, "bold"))
+    except Exception:
+        pass
+    MainWindow(root)
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    # 总览要并排摆两个号码盘，默认最大化
+    try:
+        root.state("zoomed")
+    except Exception:
+        w, h = min(1180, int(sw * 0.94)), min(880, int(sh * 0.94))
+        root.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 4)))
+    try:
+        root.attributes("-topmost", True)
+        root.after(2000, lambda: root.attributes("-topmost", False))
+    except Exception:
+        pass
+    root.mainloop()
+    return 0
+
+
+class QuickBetDialog(tk.Toplevel):
+    """粘一段客户原文，先看清规则认成什么，对得上再记账。
+
+    存在的理由：客户经常只发错一个字（把"鼠 5 5尾各10"写成"鼠5尾各10"），
+    让对重发一轮要等半天；这里把原文改一下就能记。走的是和微信推送
+    完全同一条解析链 —— 规则优先、模型兜底、12/13/14 直接判死。
+    """
+
+    def __init__(self, master, account: str, chats=None, on_done=None):
+        super().__init__(master)
+        self.title("文本记账")
+        self.account = account or "default"
+        self.chats = list(chats or [])
+        self.on_done = on_done
+        self.configure(bg=CLR_BG)
+        self.resizable(False, False)
+
+        wrap = tk.Frame(self, bg=CLR_BG)
+        wrap.pack(fill="both", expand=True, padx=16, pady=(14, 12))
+
+        tk.Label(wrap, text="文本记账", font=FONT_T, bg=CLR_BG, fg="#111827"
+                 ).pack(anchor="w")
+        tk.Label(wrap, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left",
+                 text="粘贴客户发来的原文。先点「解析」看规则认成什么，对得上再点「记账」。"
+                 ).pack(anchor="w", pady=(2, 8))
+
+        row = tk.Frame(wrap, bg=CLR_BG)
+        row.pack(fill="x", pady=(0, 6))
+        tk.Label(row, text="记入账号", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED).pack(side="left")
+        # 账必须落到具体账号上：主界面停在「全部账号（合计）」时没有账号可记，
+        # 所以这里给下拉，默认取主界面选中的那个，没选就取唯一/第一个账号。
+        self._accounts = self._load_accounts()
+        if self._accounts and self.account not in self._accounts:
+            self.account = self._accounts[0]
+        self.v_acc = tk.StringVar(value=self.account)
+        ttk.Combobox(row, textvariable=self.v_acc, state="readonly", font=FONT_S,
+                     values=self._accounts, width=18).pack(side="left", padx=(6, 16))
+
+        # 账号是「哪个微信号的账」，对象是「谁下的注」——两个都得有，
+        # 只记账号的话，同一个号下面几个人下单就分不出谁是谁了。
+        tk.Label(row, text="挂在谁名下", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED
+                 ).pack(side="left")
+        self.v_chat = tk.StringVar(value="")
+        self.cb_chat = ttk.Combobox(row, textvariable=self.v_chat, font=FONT_S,
+                                    state="normal", values=self.chats, width=16)
+        self.cb_chat.pack(side="left", padx=6)
+        self.cb_chat.bind("<Return>", lambda e: self.do_record())
+
+        self.txt = tk.Text(wrap, height=5, width=56, font=FONT, relief="solid", bd=1,
+                           bg=CLR_CARD, fg="#111827", wrap="word", undo=True)
+        self.txt.pack(fill="x")
+        self.txt.focus_set()
+
+        btns = tk.Frame(wrap, bg=CLR_BG)
+        btns.pack(fill="x", pady=8)
+
+        def mk(text, cmd, bg, fg, w=8):
+            return tk.Button(btns, text=text, font=FONT, bg=bg, fg=fg, relief="flat",
+                             bd=0, cursor="hand2", command=cmd, width=w)
+
+        # 按钮靠右，左边只留「连续记账」勾选；默认记完一笔就关窗。
+        # 勾选后记完不关，清空输入接着录下一笔。
+        self.v_loop = tk.BooleanVar(value=False)
+        tk.Checkbutton(btns, text="连续记账", variable=self.v_loop, font=FONT_S,
+                       bg=CLR_BG, fg=CLR_MUTED, activebackground=CLR_BG,
+                       selectcolor=CLR_BG, bd=0, highlightthickness=0,
+                       cursor="hand2").pack(side="left")
+        mk("记账", self.do_record, CLR_BLUE, "white", 9).pack(side="right")
+        mk("解析", self.do_parse, "#eef7ff", CLR_BLUE2, 7).pack(side="right", padx=(0, 8))
+
+        self.lb_result = tk.Label(wrap, text="", font=FONT, bg=CLR_BG, fg=CLR_MUTED,
+                                  justify="left", anchor="w", wraplength=540)
+        self.lb_result.pack(fill="x", pady=(2, 0))
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Control-Return>", lambda e: self.do_record())
+        # 输入框吃掉 Ctrl+P 默认是插入控制字符，改成直接解析，省一次鼠标
+        self.bind("<Control-p>", lambda e: self.do_parse())
+
+        # 固定在父窗口左上方一点，别让 Tk 随便丢到屏幕角落
+        self.update_idletasks()
+        try:
+            x = master.winfo_rootx() + 40
+            y = master.winfo_rooty() + 70
+            self.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+        except Exception:
+            pass
+
+    def _load_accounts(self):
+        d = api_get("/api/accounts")
+        out = [str(a.get("account") or "") for a in (d.get("accounts") or [])]
+        out = [a for a in out if a]
+        if out:
+            return out
+        return [self.account] if self.account else []
+
+    def _text(self) -> str:
+        return (self.txt.get("1.0", "end") or "").strip()
+
+    def _show(self, text, color):
+        self.lb_result.configure(text=text, fg=color)
+
+    def do_parse(self):
+        t = self._text()
+        if not t:
+            self._show("先粘一段文本", CLR_MUTED)
+            return
+        d = api_post("/api/parse", {"text": t})
+        if d.get("ok"):
+            self._show("%s\n规则识别 · %s 个号 · 合计 %s 元"
+                       % (d.get("detail") or "", d.get("numbers") or 0,
+                          fmt_money(d.get("total"))), CLR_OK)
+            return
+        if d.get("error"):
+            self._show("接口出错：%s" % d.get("error"), CLR_BAD)
+        elif d.get("can_llm"):
+            self._show("%s\n（点「记账」会交给模型再试一次）"
+                       % (d.get("reason") or "规则没认出来"), "#b45309")
+        else:
+            self._show("认不了：%s\n（这类也不交给模型，改一下写法再试）"
+                       % (d.get("reason") or ""), CLR_BAD)
+
+    def do_record(self):
+        t = self._text()
+        if not t:
+            self._show("先粘一段文本", CLR_MUTED)
+            return
+        acc = (self.v_acc.get() or "").strip() or self.account
+        chat = (self.v_chat.get() or "").strip()
+        d = api_post("/api/quick_bet", {"text": t, "account": acc, "chat": chat})
+        if not d.get("ok"):
+            self._show("没记上：%s" % (d.get("reason") or d.get("error") or "未知原因"), CLR_BAD)
+            return
+        mkname = "香港" if d.get("market") == "HK" else "澳门"
+        msg = ("已记账（%s）：%s\n对象 %s · 账号 %s · %s 个号 · 合计 %s 元"
+               % (mkname, d.get("detail") or "", chat or "手工记账",
+                  d.get("account") or self.account,
+                  d.get("numbers") or 0, fmt_money(d.get("total"))))
+        if d.get("archived_issue"):
+            # 换期会把上一期清零，不说明白就跟丢账一样
+            msg += ("\n已换期：上一期 %s 归档，金额 %s 元（现在的数从本期重新算）"
+                    % (d.get("archived_issue"), fmt_money(d.get("archived_total"))))
+        self._show(msg, CLR_OK)
+        if self.on_done:
+            try:
+                self.on_done()
+            except Exception:
+                pass
+        if self.v_loop.get():
+            # 连续记账：留在窗口里，清空输入，焦点回到文本框
+            self.txt.delete("1.0", "end")
+            self.txt.focus_set()
+        else:
+            # 记完一笔就关 —— 给个短延时，先让人看见记成了什么
+            self.after(1200, self._close)
+
+    def _close(self):
+        """延时关窗时窗口可能已经被 Esc 关掉了，别在这儿抛异常。"""
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+
+class ManualBetDialog(tk.Toplevel):
+    """手工补录：点号码 / 点生肖 / 点波段，再填一个金额，回车成注。
+
+    不用打字。号码是多选「每号各记这个金额」，生肖是「一共这个金额、摊到它名下
+    的号上」——这两种口径在实体单上本来就不一样，界面上写清楚，清单里也写出来。
+    波段（波色 / 头组 / 大小单双 / 尾数）这一版只灰着摆出来，看得见有哪些玩法、
+    不能点：它们各自一套赔率，记进号码盘会把 10 块记成 170 块。
+    """
+
+    HINT = "点号码（每号各记）／点生肖（总额摊开）／填金额回车加入"
+
+    COLORS = {"红波": "#c0392b", "蓝波": "#1f6feb", "绿波": "#1a7f37"}
+    PICK_BORDER = "#f59e0b"
+
+    OPTIONS = [
+        ("红波", "波色"), ("蓝波", "波色"), ("绿波", "波色"),
+        ("红单", "波色单双"), ("红双", "波色单双"),
+        ("蓝单", "波色单双"), ("蓝双", "波色单双"),
+        ("绿单", "波色单双"), ("绿双", "波色单双"),
+        ("0头", "头组"), ("1头", "头组"), ("2头", "头组"),
+        ("3头", "头组"), ("4头", "头组"),
+        ("大", "大小"), ("小", "大小"), ("单", "单双"), ("双", "单双"),
+        ("尾数", "尾数"), ("五行", "五行"),
+    ]
+
+    def __init__(self, master, mapping, grid, chats, on_submit=None, demo=False):
+        super().__init__(master)
+        self.title("手工记账")
+        self.configure(bg=CLR_CARD)
+        self.transient(master)
+        self.mapping = mapping or {}
+        self.grid = list(grid or [])
+        self.chats = list(chats or [])
+        self.on_submit = on_submit
+        self.notes = []              # 已加入的注：{applied, total, desc}
+        self.sel_nums = set()
+        self.sel_zodiac = None
+        self._num_lb = {}
+        self._z_lb = {}
+        self._event = None
+        self._build()
+        self.update_idletasks()
+        self.geometry("680x820+%d+%d" % (
+            max(0, master.winfo_rootx() + (master.winfo_width() - 680) // 2),
+            max(0, master.winfo_rooty() + (master.winfo_height() - 820) // 2)))
+        self.update()
+        self.minsize(680, 820)
+        self.maxsize(680, 820)
+        self._repaint()
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        if demo:
+            self.after(250, self._demo)
+
+    def _demo(self):
+        """只在 MSB_MANUAL=2 调试时用：预填几注，方便截图看效果。"""
+        self.v_chat.set(self.chats[0] if self.chats else "老郭")
+        self.sel_nums = {"06", "18"}
+        self.v_amt.set("50")
+        self._repaint()
+        self._add()
+        self.sel_zodiac = "牛"
+        self.v_amt.set("100")
+        self._repaint()
+        self._add()
+        self.sel_zodiac = None
+        self.sel_nums = {"06", "18"}
+        self.v_amt.set("50")
+        self._repaint()
+        self.lb_note.configure(text="")
+        self._refresh_foot()
+
+    # ---------- 界面 ----------
+    def _build(self):
+        wrap = tk.Frame(self, bg=CLR_CARD)
+        wrap.pack(fill="both", expand=True, padx=14, pady=10)
+        wrap.grid_columnconfigure(0, weight=1)
+
+        tk.Label(wrap, text="手工记账", font=FONT_T, bg=CLR_CARD, fg="#111827"
+                 ).grid(row=0, column=0, sticky="w")
+        tk.Label(wrap, text=self.HINT, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).grid(row=1, column=0, sticky="w", pady=(2, 8))
+
+        # 号码盘：一行一个生肖，格子里是号，底色就是波色
+        board = tk.Frame(wrap, bg=CLR_CARD)
+        board.grid(row=2, column=0, sticky="w")
+        for r, rowd in enumerate(self.grid):
+            tk.Label(board, text=rowd["zodiac"], font=FONT_S, bg=CLR_CARD,
+                     fg="#374151", width=2, anchor="w").grid(row=r, column=0, sticky="w")
+            for c, cell in enumerate(rowd["cells"], 1):
+                n = cell["num"]
+                color = self.COLORS.get(cell.get("color"), "#6b7280")
+                lb = tk.Label(board, text=n, font=FONT_NUM, bg=color, fg="white",
+                              width=3, cursor="hand2", padx=1, pady=2,
+                              highlightthickness=2, highlightbackground=color)
+                lb.grid(row=r, column=c, padx=1, pady=1)
+                lb.bind("<Button-1>", lambda e, x=n: self._pick_num(x))
+                self._num_lb[n] = lb
+
+        # 生肖：点一下等于选了它名下所有号，但按「总额摊开」算
+        zbar = tk.Frame(wrap, bg=CLR_CARD)
+        zbar.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        tk.Label(zbar, text="生肖", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).grid(row=0, column=0, padx=(0, 6))
+        for i, rowd in enumerate(self.grid, 1):
+            z = rowd["zodiac"]
+            b = tk.Label(zbar, text=z, font=FONT_S, bg="#eef0f3", fg="#374151",
+                         width=2, cursor="hand2", padx=2, pady=3)
+            b.grid(row=0, column=i, padx=1)
+            b.bind("<Button-1>", lambda e, x=z: self._pick_zodiac(x))
+            self._z_lb[z] = b
+
+        # 波段：这一版灰着，只让人看见有哪些玩法，点不动
+        obar = tk.Frame(wrap, bg=CLR_CARD)
+        obar.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        tk.Label(obar, text="波段", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).grid(row=0, column=0, rowspan=2, padx=(0, 6))
+        for i, (name, kind) in enumerate(self.OPTIONS):
+            r, c = divmod(i, 10)
+            b = tk.Label(obar, text=name, font=FONT_S, bg="#f7f8fa", fg="#c4cad3",
+                         width=4, cursor="arrow", padx=2, pady=3)
+            b.grid(row=r, column=c + 1, padx=1, pady=1)
+        tk.Label(obar, text="（本期未开放）", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).grid(row=0, column=11, rowspan=2, padx=(8, 0))
+
+        # 已选 + 金额 + 加入
+        pick = tk.Frame(wrap, bg=CLR_CARD)
+        pick.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        tk.Label(pick, text="已选", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).pack(side="left")
+        self.lb_pick = tk.Label(pick, text="（还没选）", font=FONT_S,
+                                bg=CLR_CARD, fg=CLR_MUTED, anchor="w")
+        self.lb_pick.pack(side="left", padx=(8, 16))
+        tk.Label(pick, text="金额", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).pack(side="left")
+        self.v_amt = tk.StringVar()
+        self.en_amt = tk.Entry(pick, textvariable=self.v_amt, font=FONT, width=9,
+                               relief="flat", bg="#fbfcfd", fg="#111827",
+                               highlightbackground=CLR_LINE, highlightthickness=1,
+                               insertbackground="#111827", justify="right")
+        self.en_amt.pack(side="left", padx=(8, 8), ipady=3)
+        self.en_amt.bind("<Return>", lambda e: self._add())
+        self.btn_add = tk.Button(pick, text="加入", font=FONT, bg=CLR_BLUE2, fg="white",
+                                 relief="flat", bd=0, width=6, cursor="hand2",
+                                 command=self._add)
+        self.btn_add.pack(side="left")
+
+        tk.Label(wrap, text="本次要记的（点「加入」累加）", font=FONT_S,
+                 bg=CLR_CARD, fg=CLR_MUTED).grid(row=6, column=0, sticky="w", pady=(12, 4))
+        lbox = tk.Frame(wrap, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                        highlightthickness=1)
+        lbox.grid(row=7, column=0, sticky="nsew")
+        wrap.grid_rowconfigure(7, weight=1)
+        self.lst = tk.Listbox(lbox, height=6, font=FONT_S, bd=0, relief="flat",
+                              bg="#fbfcfd", fg="#111827", activestyle="none",
+                              highlightthickness=0, selectbackground="#dbeafe")
+        self.lst.pack(fill="both", expand=True, padx=2, pady=2)
+
+        foot = tk.Frame(wrap, bg=CLR_CARD)
+        foot.grid(row=8, column=0, sticky="ew", pady=(10, 0))
+        self.lb_total = tk.Label(foot, text="合计 0 元", font=FONT_B,
+                                 bg=CLR_CARD, fg=CLR_RED)
+        self.lb_total.pack(side="left")
+        tk.Label(foot, text="挂在谁名下", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).pack(side="left", padx=(18, 6))
+        self.v_chat = tk.StringVar()
+        self.cb_chat = ttk.Combobox(foot, textvariable=self.v_chat, font=FONT_S,
+                                    width=18, values=self.chats)
+        self.cb_chat.pack(side="left")
+        self.cb_chat.bind("<KeyRelease>", self._on_typed)
+        self.cb_chat.bind("<<ComboboxSelected>>", self._on_typed)
+
+        tk.Button(foot, text="取消", font=FONT, bg="#eef0f3", fg="#374151", relief="flat",
+                  bd=0, width=7, cursor="hand2", command=self.destroy).pack(side="right")
+        self.btn_ok = tk.Button(foot, text="记账", font=FONT, bg=CLR_BLUE, fg="white",
+                                relief="flat", bd=0, width=8, cursor="hand2",
+                                command=self._submit)
+        self.btn_ok.pack(side="right", padx=(0, 6))
+        tk.Button(foot, text="删掉选中", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, width=8, cursor="hand2",
+                  command=self._drop).pack(side="right", padx=(0, 12))
+
+        self.lb_note = tk.Label(wrap, text="", font=FONT_S, bg=CLR_CARD, fg=CLR_BAD,
+                                anchor="w")
+        self.lb_note.grid(row=9, column=0, sticky="w", pady=(6, 0))
+
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    # ---------- 点选 ----------
+    def _pick_num(self, n):
+        self.sel_zodiac = None
+        if n in self.sel_nums:
+            self.sel_nums.discard(n)
+        else:
+            self.sel_nums.add(n)
+        self._repaint()
+
+    def _pick_zodiac(self, z):
+        self.sel_nums = set()
+        self.sel_zodiac = None if self.sel_zodiac == z else z
+        self._repaint()
+
+    def _repaint(self):
+        sel = self.sel_nums
+        for n, lb in self._num_lb.items():
+            on = n in sel
+            lb.configure(text=("✓" + n) if on else n,
+                         width=4 if on else 3,
+                         font=FONT_B if on else FONT_NUM,
+                         highlightbackground=self.PICK_BORDER if on else lb.cget("bg"))
+        for z, b in self._z_lb.items():
+            on = (self.sel_zodiac == z)
+            b.configure(bg="#fde68a" if on else "#eef0f3",
+                        fg="#92400e" if on else "#374151")
+
+        if self.sel_zodiac:
+            nums = sorted(self.mapping.get(self.sel_zodiac, []))
+            self.lb_pick.configure(
+                text="%s（%s）· 填的金额是这一组的总数" % (self.sel_zodiac, "/".join(nums)),
+                fg="#92400e")
+        elif self.sel_nums:
+            self.lb_pick.configure(
+                text="%s · 每号各记填的金额" % " ".join(sorted(self.sel_nums)),
+                fg="#92400e")
+        else:
+            self.lb_pick.configure(text="（还没选）", fg=CLR_MUTED)
+
+        self._refresh_foot()
+
+    # ---------- 加入 ----------
+    def _add(self):
+        raw = (self.v_amt.get() or "").strip().replace("，", "")
+        try:
+            amount = float(raw)
+        except Exception:
+            return self._say("金额写个数字，比如 50")
+        if amount <= 0:
+            return self._say("金额要大于 0")
+
+        if self.sel_zodiac:
+            nums = sorted(self.mapping.get(self.sel_zodiac, []))
+            if not nums:
+                return self._say("生肖表里没有「%s」" % self.sel_zodiac)
+            applied = self._split(nums, amount, pool=True)
+            desc = "%s（%s）各 %s，合计 %s" % (
+                self.sel_zodiac, "/".join(nums),
+                self._money(round(amount / len(nums), 2)), self._money(amount))
+        elif self.sel_nums:
+            nums = sorted(self.sel_nums)
+            applied = self._split(nums, amount, pool=False)
+            desc = "%s 各 %s，合计 %s" % (
+                " ".join(nums), self._money(amount),
+                self._money(round(amount * len(nums), 2)))
+        else:
+            return self._say("先点号码或生肖")
+
+        self.notes.append({"applied": applied, "desc": desc,
+                           "total": round(sum(applied.values()), 2)})
+        self.sel_nums = set()
+        self.sel_zodiac = None
+        self.v_amt.set("")
+        self._say("")
+        self._refresh_list()
+        self._repaint()
+        self.en_amt.focus_set()
+
+    @staticmethod
+    def _split(nums, amount, pool):
+        out = {}
+        if pool:
+            n = len(nums)
+            per = round(amount / n, 2)
+            last = round(amount - per * (n - 1), 2)
+            for i, num in enumerate(nums):
+                out[num] = last if i == n - 1 else per
+        else:
+            for num in nums:
+                out[num] = round(amount, 2)
+        return out
+
+    @staticmethod
+    def _money(v):
+        s = ("%.2f" % float(v)).rstrip("0").rstrip(".")
+        return s if s else "0"
+
+    def _drop(self):
+        idx = self.lst.curselection()
+        if not idx:
+            return self._say("先在清单里点一行")
+        self.notes.pop(idx[0])
+        self._refresh_list()
+
+    def _refresh_list(self):
+        self.lst.delete(0, "end")
+        for i, n in enumerate(self.notes):
+            self.lst.insert("end", "%d. %s" % (i + 1, n["desc"]))
+        self.lb_total.configure(
+            text="合计 %s 元 / %d 注" % (
+                self._money(sum(n["total"] for n in self.notes)), len(self.notes)))
+        self._refresh_foot()
+
+    def _refresh_foot(self):
+        chat = (self.v_chat.get() or "").strip()
+        ok = bool(self.notes) and bool(chat)
+        try:
+            self.btn_ok.configure(state="normal" if ok else "disabled")
+        except Exception:
+            pass
+        if not ok and self.notes and not chat:
+            self.lb_note.configure(text="填一下挂在谁名下")
+
+    def _say(self, msg):
+        self.lb_note.configure(text=msg)
+        if self._event:
+            try:
+                self.after_cancel(self._event)
+            except Exception:
+                pass
+        if msg:
+            self._event = self.after(3000, lambda: self.lb_note.configure(text=""))
+
+    def _on_typed(self, event=None):
+        self.lb_note.configure(text="")
+        self._refresh_foot()
+
+    def _submit(self):
+        if not self.notes:
+            return
+        chat = (self.v_chat.get() or "").strip()
+        if not chat:
+            self._say("填一下挂在谁名下")
+            self.cb_chat.focus_set()
+            return
+        if self.on_submit:
+            self.on_submit(self.notes, chat)
+        self.destroy()
+
+
+if __name__ == "__main__":
+    sys.exit(run())

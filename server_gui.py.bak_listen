@@ -1,0 +1,1236 @@
+# -*- coding: utf-8 -*-
+"""服务端控制台 —— 双击 MarkSixBot.exe（不带参数）就打开这个窗口。
+
+单机版：原先网页看板能看的、能点的，这里都有一份，不用开浏览器。
+
+四个页签：
+  · 总览     —— 汇总数字 + 号码盘 + 风险排序 + 最近记账 + 未解析
+  · 监听对象 —— 勾选要监听的群/好友，保存并下发给采集端
+  · 配置     —— 推送密钥 / 大模型 Key / 端口
+  · 日志     —— 当天日志尾巴
+
+**故意不 import main**：main 一被导入就会立刻挂日志 FileHandler、
+建 Flask app、抢 .bot.lock，GUI 进程会跟后台服务互相打架（日志文件被占用、
+锁拿不到）。所以路径、配置、读数据都在 msb_paths / msb_view 里各实现一份。
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+import msb_view
+import msb_paths as _paths
+
+CLR_BG = "#f6f7f9"
+CLR_CARD = "#ffffff"
+CLR_LINE = "#dfe3e8"
+CLR_OK = "#1a7f37"
+CLR_BAD = "#c0392b"
+CLR_MUTED = "#6b7280"
+CLR_BLUE = "#1f6feb"
+CLR_RED = "#c0392b"
+CLR_BLUE2 = "#2b6cb0"
+CLR_GREEN = "#2b8a5f"
+CLR_GREY = "#aab2bd"
+
+FONT = ("Microsoft YaHei UI", 10)
+FONT_B = ("Microsoft YaHei UI", 10, "bold")
+FONT_S = ("Microsoft YaHei UI", 9)
+FONT_T = ("Microsoft YaHei UI", 15, "bold")
+
+# 号码盘用等宽数字，看得清
+FONT_NUM = ("Consolas", 9, "bold")
+FONT_AMT = ("Consolas", 9)
+
+
+class TabBar(tk.Frame):
+    """自绘页签：每个页签固定宽高，选中的用深色底 + 白字。
+
+    为什么不用 ttk.Notebook：ttk 的页签宽度由标题文字长度决定，而「选中」态
+    在 vista 主题下会向内缩一圈、在 clam 主题下会向下多探 2 像素去压内容区的
+    边框（实测选中 42px、未选中 40px）。几个页签因此总是大小不一，而且选中的
+    那个还比未选中的浅。这里改成固定像素的方块，选不选中尺寸完全一样。
+
+    对外接口按 ttk.Notebook 的用法写：add(frame, text=...) / select(frame) /
+    current() / index(frame)，另外用 on_change() 代替 <<NotebookTabChanged>>。
+    """
+
+    BTN_W = 108          # 每个页签的宽度（像素），与标题长短无关
+    BTN_H = 34           # 高度
+    ON_BG, ON_FG = "#2b3444", "#ffffff"
+    OFF_BG, OFF_FG = "#e7eaee", "#3b4453"
+
+    def __init__(self, master, bg="#f6f7f9"):
+        super().__init__(master, bg=bg)
+        self._bar = tk.Frame(self, bg=bg)
+        self._bar.pack(fill="x")
+        tk.Frame(self, height=1, bg=CLR_LINE).pack(fill="x")
+        self._body = tk.Frame(self, bg=bg)
+        self._body.pack(fill="both", expand=True)
+        self._items = []          # [(holder, label, frame)]
+        self._cur = -1
+        self._cb = None
+
+    def add(self, frame, text="", **_ignored):
+        idx = len(self._items)
+        holder = tk.Frame(self._bar, width=self.BTN_W, height=self.BTN_H,
+                          bg=self.OFF_BG, cursor="hand2")
+        holder.pack(side="left", padx=(0, 2))
+        holder.pack_propagate(False)
+        lab = tk.Label(holder, text=text, font=FONT, bg=self.OFF_BG,
+                       fg=self.OFF_FG, cursor="hand2")
+        lab.place(relx=0.5, rely=0.5, anchor="center")
+        for w in (holder, lab):
+            w.bind("<Button-1>", lambda _e, i=idx: self.select(i))
+        self._items.append((holder, lab, frame))
+        if self._cur < 0:
+            self._cur = idx
+            self._apply()
+        return frame
+
+    def tabs(self):
+        return tuple(f for _, _, f in self._items)
+
+    def index(self, frame):
+        for i, (_, _, f) in enumerate(self._items):
+            if f is frame or str(f) == str(frame):
+                return i
+        return -1
+
+    def current(self):
+        return self._cur
+
+    def select(self, target):
+        idx = target if isinstance(target, int) else self.index(target)
+        if not (0 <= idx < len(self._items)):
+            return
+        self._cur = idx
+        self._apply()
+        if self._cb:
+            try:
+                self._cb()
+            except Exception:
+                pass
+
+    def _apply(self):
+        for i, (holder, lab, frame) in enumerate(self._items):
+            on = (i == self._cur)
+            holder.configure(bg=self.ON_BG if on else self.OFF_BG)
+            lab.configure(bg=self.ON_BG if on else self.OFF_BG,
+                          fg=self.ON_FG if on else self.OFF_FG,
+                          font=FONT_B if on else FONT)
+            if on:
+                frame.pack(in_=self._body, fill="both", expand=True)
+            else:
+                frame.pack_forget()
+
+    def on_change(self, func):
+        """页签切换回调（代替 ttk 的 <<NotebookTabChanged>>）。"""
+        self._cb = func
+
+DEFAULT_BASE = ("https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com"
+                "/compatible-mode/v1")
+
+DEFAULTS = {
+    "port": 8899,
+    "host": "0.0.0.0",
+    "wx_push_secret": "",
+    "wx_account_secrets": "",
+    "wx_skew_sec": 300,
+    "llm_api_key": "",
+    "llm_base_url": DEFAULT_BASE,
+    "llm_model": "qwen3.8-27b",
+    "llm_thinking": 0,
+    "llm_timeout": 60,
+    "contacts_interval_sec": 21600,
+}
+
+
+# ---------------- 路径与配置 ----------------
+
+def app_dir() -> Path:
+    return _paths.APP_DIR
+
+
+def data_dir() -> Path:
+    return _paths.DATA_DIR
+
+
+def config_path() -> Path:
+    return _paths.CONFIG_PATH
+
+
+# 打开面板也做一次迁移：否则客户第一眼看到「0 个账号 / 0 元」，会以为账丢了
+_ADOPTED = _paths.adopt_old_layout()
+
+
+def read_cfg() -> dict:
+    d = dict(DEFAULTS)
+    p = config_path()
+    if p.exists():
+        try:
+            with open(p, "r", encoding="utf-8-sig") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    d[k] = v
+        except Exception:
+            pass
+    return d
+
+
+def write_cfg(d: dict) -> None:
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    doc = dict(read_cfg())
+    doc.update(d)
+    tmp = p.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+# ---------------- 运行状态 ----------------
+
+def self_cmd() -> list:
+    """起后台服务用的命令行。打包后就是自己的 EXE。"""
+    exe = Path(sys.argv[0])
+    try:
+        if exe.suffix.lower() == ".exe" and exe.is_file():
+            return [str(exe.resolve())]
+    except Exception:
+        pass
+    return [sys.executable, str(Path(__file__).resolve().parent / "main.py")]
+
+
+def pid_path() -> Path:
+    return data_dir() / ".server_gui.pid"
+
+
+def health(port: int, timeout: float = 2.0):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/health" % int(port),
+                                    timeout=timeout) as r:
+            body = r.read(64).decode("utf-8", "ignore")
+            return (int(getattr(r, "status", 200)) == 200 and body.strip().startswith("OK"),
+                    "HTTP %s" % getattr(r, "status", "?"))
+    except urllib.error.HTTPError as e:
+        return False, "HTTP %s" % e.code
+    except Exception as e:
+        return False, type(e).__name__
+
+
+def _pid_alive(pid: int) -> bool:
+    """直接问内核，不拉 tasklist（Windows 11 会把控制台程序转到 Windows Terminal，闪黑窗）。"""
+    if not pid:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
+                                           ctypes.POINTER(wintypes.DWORD)]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = k32.OpenProcess(0x1000, False, int(pid))   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = wintypes.DWORD(0)
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259          # STILL_ACTIVE
+    except Exception:
+        return False
+
+
+def running_pid() -> int:
+    try:
+        return int(pid_path().read_text(encoding="utf-8").strip() or 0)
+    except Exception:
+        return 0
+
+
+def api_post(path: str, payload=None, port: int = 8899) -> dict:
+    """调本地接口。备份 / 清空 / 下发监听对象这些写操作走接口，
+    不直接改文件 —— 服务端内存里有缓存，绕过去会打架。"""
+    url = "http://127.0.0.1:%d%s" % (int(port), path)
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8", "ignore") or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode("utf-8", "ignore") or "{}")
+        except Exception:
+            return {"ok": False, "error": "HTTP %s" % e.code}
+    except Exception as e:
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def fmt_money(v) -> str:
+    """865.0 → 865；865.5 → 865.5。金额太小的小数点不显示成 .00。"""
+    try:
+        n = float(v or 0)
+    except Exception:
+        return "0"
+    if abs(n - round(n)) < 1e-9:
+        return "%.0f" % n
+    return ("%.2f" % n).rstrip("0").rstrip(".")
+
+
+# ---------------- 主窗口 ----------------
+
+class MainWindow:
+    def __init__(self, root):
+        self.root = root
+        self.cfg = read_cfg()
+        self._proc = None
+        self.acc = ""                 # 空 = 全部账号合计
+        self._acc_sig = None
+        self._grid_cells = []
+        # 号码盘 / 风险表 / 最近记账的「上次数值指纹」。三个表都是销毁重建，
+        # 一旦每 5 秒无条件重画，号码盘就是一屏闪烁。数值没变就别动它。
+        self._grid_sig = None
+        self._risk_sig = None
+        self._rec_sig = None
+
+        root.title("MarkSixBot 服务端控制台")
+        root.configure(bg=CLR_BG)
+        root.minsize(1040, 700)
+
+        self._build_ui()
+        self._refresh_status()
+        self._loop()
+
+    # ---- 布局 ----
+    def _build_ui(self):
+        # 原来这里有一条「MarkSixBot 服务端控制台 + 副标题」的标题条，纯占高度，
+        # 程序名在窗口标题栏上已经有了，去掉。
+        card = tk.Frame(self.root, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                        highlightthickness=1)
+        card.pack(fill="x", padx=16, pady=(12, 8))
+        inner = tk.Frame(card, bg=CLR_CARD)
+        inner.pack(fill="x", padx=14, pady=10)
+
+        self.lb_state = tk.Label(inner, text="● 检测中",
+                                 font=("Microsoft YaHei UI", 13, "bold"),
+                                 bg=CLR_CARD, fg=CLR_MUTED)
+        self.lb_state.grid(row=0, column=0, sticky="w")
+        self.lb_hint = tk.Label(inner, text="", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED)
+        self.lb_hint.grid(row=0, column=1, columnspan=4, sticky="w", padx=10)
+
+        cells = [("端口", "lb_port"), ("看板地址", "lb_dash"), ("账号 / 累计 / 今日", "lb_sum")]
+        for i, (t, attr) in enumerate(cells):
+            wrap = tk.Frame(inner, bg=CLR_CARD)
+            wrap.grid(row=1, column=i, sticky="w", padx=(0, 26), pady=(8, 0))
+            tk.Label(wrap, text=t, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED).pack(anchor="w")
+            lb = tk.Label(wrap, text="—", font=FONT_B, bg=CLR_CARD, fg="#111827")
+            lb.pack(anchor="w")
+            setattr(self, attr, lb)
+
+        # 按钮条必须先于 Notebook 占位：Tk 的 pack 按调用顺序分空间，
+        # 先 pack 的 expand 控件会把剩余高度全吃掉，后 pack 的底部条就只剩一条缝。
+        bar = tk.Frame(self.root, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                       highlightthickness=1)
+        bar.pack(fill="x", side="bottom")
+
+        nb = TabBar(self.root, bg=CLR_BG)
+        nb.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self.nb = nb
+        self.tab_ov = tk.Frame(nb, bg=CLR_BG)
+        self.tab_cfg = tk.Frame(nb, bg=CLR_BG)
+        self.tab_log = tk.Frame(nb, bg=CLR_BG)
+        nb.add(self.tab_ov, text="总览")
+        nb.add(self.tab_cfg, text="配置")
+        nb.add(self.tab_log, text="日志")
+        self._build_tab_overview(self.tab_ov)
+        self._build_tab_cfg(self.tab_cfg)
+        self._build_tab_log(self.tab_log)
+        nb.on_change(self._on_tab)
+
+        # 预选页签（调试 / 自检用，平时不设这个环境变量）
+        want = (os.environ.get("MSB_TAB") or "").strip()
+        if want.isdigit():
+            tabs = [self.tab_ov, self.tab_cfg, self.tab_log]
+            idx = int(want)
+            if 0 <= idx < len(tabs):
+                nb.select(tabs[idx])
+
+        def mkbtn(text, cmd, bg, fg, width=10):
+            return tk.Button(bar, text=text, font=FONT, bg=bg, fg=fg, relief="flat",
+                             bd=0, cursor="hand2", command=cmd, width=width)
+
+        self.btn_start = mkbtn("启动服务", self.start_server, CLR_BLUE, "white", 11)
+        self.btn_start.pack(side="left", padx=(12, 6), pady=8)
+        self.btn_stop = mkbtn("停止服务", self.stop_server, "#eef0f3", "#374151", 9)
+        self.btn_stop.pack(side="left", padx=6, pady=8)
+        mkbtn("备份", self.do_backup, "#eef0f3", "#374151", 7).pack(side="left", padx=6, pady=8)
+        mkbtn("清空当前账号", self.do_reset, "#fdf4f3", CLR_RED, 13).pack(side="left", padx=6, pady=8)
+        mkbtn("打开看板", self.open_dashboard, "#eef0f3", "#374151", 10).pack(side="left", padx=6, pady=8)
+        self.v_auto = tk.BooleanVar(value=self._autorun_on())
+        tk.Checkbutton(bar, text="开机自动启动", variable=self.v_auto, font=FONT_S,
+                       bg=CLR_CARD, fg=CLR_MUTED, activebackground=CLR_CARD,
+                       selectcolor=CLR_CARD, command=self.toggle_autorun
+                       ).pack(side="right", padx=12)
+
+    # ---------- 总览 ----------
+    def _build_tab_overview(self, tab):
+        # 顶部汇总条
+        sbar = tk.Frame(tab, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                        highlightthickness=1)
+        sbar.pack(fill="x", padx=10, pady=(10, 8))
+        row = tk.Frame(sbar, bg=CLR_CARD)
+        row.pack(fill="x", padx=12, pady=9)
+
+        tk.Label(row, text="总金额", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).pack(side="left")
+        self.lb_grand = tk.Label(row, text="0", font=("Microsoft YaHei UI", 20, "bold"),
+                                 bg=CLR_CARD, fg=CLR_RED)
+        self.lb_grand.pack(side="left", padx=(6, 18))
+
+        def chip(label, attr):
+            w = tk.Frame(row, bg=CLR_CARD)
+            w.pack(side="left", padx=(0, 16))
+            tk.Label(w, text=label, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED).pack(side="left")
+            lb = tk.Label(w, text="—", font=FONT_B, bg=CLR_CARD, fg="#111827")
+            lb.pack(side="left", padx=(4, 0))
+            setattr(self, attr, lb)
+
+        chip("生肖年", "lb_zyear")
+        chip("有注号码", "lb_kbets")
+        chip("今日已记账", "lb_krec")
+        chip("今日未解析", "lb_kunp")
+
+        self.btn_unp = tk.Button(row, text="未解析 0", font=FONT_S, bg="#fdf4f3",
+                                 fg=CLR_RED, relief="flat", bd=0, cursor="hand2",
+                                 command=self.show_unparsed)
+        self.btn_unp.pack(side="left", padx=(4, 0))
+
+        tk.Label(row, text="账号", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
+                 ).pack(side="right", padx=(6, 4))
+        self.acc_var = tk.StringVar(value="")
+        self.acc_sel = ttk.Combobox(row, textvariable=self.acc_var, state="readonly",
+                                    width=22, font=FONT_S)
+        self.acc_sel.pack(side="right")
+        self.acc_sel.bind("<<ComboboxSelected>>", self._on_acc_change)
+
+        # 中部：左号码盘 / 右风险
+        # 顺序要紧：pack 按调用先后分空间。先把「最近记账」用 side="bottom" 占住底部，
+        # 再让中间那块 expand 吃剩下的，否则 expand 那块会把下面的表格挤成一条缝。
+        bp = tk.LabelFrame(tab, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
+                           fg="#111827", bd=1, relief="groove")
+        bp.pack(fill="x", side="bottom", padx=10, pady=(8, 10))
+        cols = ("ts", "chat", "who", "text", "nums", "amt", "grand")
+        self.tv_rec = ttk.Treeview(bp, columns=cols, show="headings", height=5)
+        for c, t, w, a in (("ts", "时间", 130, "w"), ("chat", "会话", 150, "w"),
+                           ("who", "发送人", 110, "w"), ("text", "原文", 320, "w"),
+                           ("nums", "号码", 56, "e"), ("amt", "本单", 74, "e"),
+                           ("grand", "累计", 76, "e")):
+            self.tv_rec.heading(c, text=t)
+            self.tv_rec.column(c, width=w, anchor=a)
+        self.tv_rec.pack(fill="both", expand=True, padx=6, pady=6)
+        self.tv_rec.tag_configure("who", foreground=CLR_BLUE)
+
+        mid = tk.Frame(tab, bg=CLR_BG)
+        mid.pack(fill="both", expand=True, padx=10)
+
+        gp = tk.LabelFrame(mid, text=" 号码盘 ", font=FONT_B, bg=CLR_BG,
+                           fg="#111827", bd=1, relief="groove")
+        gp.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        self.grid_holder = tk.Frame(gp, bg=CLR_BG)
+        self.grid_holder.pack(fill="both", expand=True, padx=6, pady=6)
+
+        rp = tk.LabelFrame(mid, text=" 总额排序（风险值） ", font=FONT_B, bg=CLR_BG,
+                           fg="#111827", bd=1, relief="groove")
+        rp.pack(side="left", fill="y", padx=(6, 0))
+        cols = ("rank", "num", "zod", "amt", "share")
+        self.tv_risk = ttk.Treeview(rp, columns=cols, show="headings", height=11)
+        for c, t, w, a in (("rank", "序", 36, "center"), ("num", "号码", 56, "center"),
+                           ("zod", "生肖", 52, "center"), ("amt", "金额", 74, "e"),
+                           ("share", "占比", 62, "e")):
+            self.tv_risk.heading(c, text=t)
+            self.tv_risk.column(c, width=w, anchor=a)
+        self.tv_risk.pack(fill="both", expand=True, padx=6, pady=6)
+        self.tv_risk.tag_configure("hot", foreground=CLR_RED)
+
+    def _render_grid(self, rows):
+        """12 个生肖各一行：左边生肖名，右边一格格「号码 + 金额」。
+
+        整盘是销毁重建的（Tk 做不了局部刷新），所以先比数值指纹：一模一样的
+        数据直接返回，否则每 5 秒刷一次就是满屏闪烁。
+        """
+        sig = tuple((r["zodiac"],
+                     tuple((c["num"], c["amount"], c["color"]) for c in r["cells"]))
+                    for r in rows)
+        if sig == self._grid_sig:
+            return
+        self._grid_sig = sig
+        if os.environ.get("MSB_DEBUG_REDRAW"):
+            try:
+                import tempfile
+                with open(os.path.join(tempfile.gettempdir(), "msb_redraw.txt"),
+                          "a", encoding="utf-8") as _f:
+                    _f.write("%s grid redraw\n" % time.strftime("%H:%M:%S"))
+            except Exception:
+                pass
+        for w in self.grid_holder.winfo_children():
+            w.destroy()
+        self._grid_cells = []
+        if not rows:
+            tk.Label(self.grid_holder, text="暂无号码表", font=FONT_S,
+                     bg=CLR_BG, fg=CLR_MUTED).pack(pady=20)
+            return
+        for r, row in enumerate(rows):
+            wrap = tk.Frame(self.grid_holder, bg=CLR_BG)
+            wrap.pack(fill="x", pady=0)
+            tk.Label(wrap, text=row["zodiac"], font=FONT_S, width=3,
+                     bg="#eaeef2", fg="#4a5463", relief="solid", bd=1,
+                     ).pack(side="left", fill="y")
+            for cell in row["cells"]:
+                color = cell["color"]
+                bg = {"红波": CLR_RED, "蓝波": CLR_BLUE2, "绿波": CLR_GREEN}.get(color, CLR_GREY)
+                # 固定格宽：每个生肖行有 4 或 5 个号码，如果让格子 expand 均分，
+                # 各行的列就会错开，纵着看全是锯齿。
+                f = tk.Frame(wrap, width=92, height=23, bg="#fafbfc",
+                             highlightbackground="#e3e7ec", highlightthickness=1)
+                f.pack(side="left", padx=(2, 0))
+                f.pack_propagate(False)
+                num = tk.Label(f, text=cell["num"], font=FONT_NUM, bg=bg, fg="white",
+                               width=3, relief="flat")
+                num.pack(side="left", padx=(3, 4), pady=2)
+                # 0 元留空而不是写个「0」：一屏 12 行 × 4 格全是 0，数字会把真正
+                # 有注的号码埋掉。
+                amt = tk.Label(f, text=fmt_money(cell["amount"]) if cell["amount"] else "",
+                               font=FONT_AMT, bg="#fafbfc", fg="#111827", anchor="w")
+                amt.pack(side="left")
+                self._grid_cells.append((num, amt))
+
+    # ---------- 监听对象 ----------
+    def _build_tab_listen(self, tab):
+        top = tk.Frame(tab, bg=CLR_BG)
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        tk.Label(top, text="勾选要监听的群 / 好友（保存后采集端约 60 秒内自动生效）",
+                 font=FONT_B, bg=CLR_BG, fg="#111827").pack(side="left")
+
+        # 监听对象是按微信号分开存的：多账号时「合计」没有意义，所以这一页
+        # 自己带一个账号选择器，而不是跟着总览页的合计走。
+        tk.Label(top, text="所属账号", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED
+                 ).pack(side="right", padx=(6, 4))
+        self.lst_acc_var = tk.StringVar(value="")
+        self.lst_acc_sel = ttk.Combobox(top, textvariable=self.lst_acc_var,
+                                        state="readonly", width=20, font=FONT_S)
+        self.lst_acc_sel.pack(side="right")
+        self.lst_acc_sel.bind("<<ComboboxSelected>>",
+                              lambda e: self._on_lst_acc())
+
+        bar = tk.Frame(tab, bg=CLR_BG)
+        bar.pack(fill="x", padx=12, pady=(0, 6))
+        tk.Label(bar, text="搜索", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED).pack(side="left")
+        self.v_kw = tk.StringVar()
+        ent = tk.Entry(bar, textvariable=self.v_kw, font=FONT_S, relief="solid",
+                       bd=1, width=26)
+        ent.pack(side="left", padx=(4, 10))
+        ent.bind("<KeyRelease>", lambda e: self.render_list())
+
+        self.v_kind = tk.StringVar(value="全部类型")
+        kind = ttk.Combobox(bar, textvariable=self.v_kind, state="readonly", width=10,
+                            values=["全部类型", "群", "好友", "文件助手", "公众号"],
+                            font=FONT_S)
+        kind.pack(side="left")
+        kind.bind("<<ComboboxSelected>>", lambda e: self.render_list())
+
+        self.lb_sel = tk.Label(bar, text="已勾选 0 个", font=FONT_S, bg=CLR_BG,
+                               fg=CLR_MUTED)
+        self.lb_sel.pack(side="left", padx=12)
+
+        tk.Button(bar, text="刷新清单", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=self.load_contacts
+                  ).pack(side="right", padx=4)
+        tk.Button(bar, text="全选当前", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2",
+                  command=lambda: self._bulk(True)).pack(side="right", padx=4)
+        tk.Button(bar, text="全不选", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2",
+                  command=lambda: self._bulk(False)).pack(side="right", padx=4)
+        tk.Button(bar, text="保存并下发", font=FONT_S, bg=CLR_BLUE, fg="white",
+                  relief="flat", bd=0, cursor="hand2", command=self.save_targets
+                  ).pack(side="right", padx=4)
+        tk.Button(bar, text="改成全部会话", font=FONT_S, bg="#eef7f1", fg=CLR_OK,
+                  relief="flat", bd=0, cursor="hand2", command=self.save_all_mode
+                  ).pack(side="right", padx=4)
+
+        body = tk.Frame(tab, bg=CLR_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        cols = ("ck", "name", "kind", "cid", "last")
+        self.tv_lst = ttk.Treeview(body, columns=cols, show="headings")
+        for c, t, w, a in (("ck", "选", 40, "center"), ("name", "名称", 300, "w"),
+                           ("kind", "类型", 90, "center"), ("cid", "微信ID", 210, "w"),
+                           ("last", "最近消息", 150, "w")):
+            self.tv_lst.heading(c, text=t)
+            self.tv_lst.column(c, width=w, anchor=a)
+        vsb = ttk.Scrollbar(body, orient="vertical", command=self.tv_lst.yview)
+        self.tv_lst.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.tv_lst.pack(side="left", fill="both", expand=True)
+        self.tv_lst.bind("<Button-1>", self._on_lst_click)
+
+        self.lb_lstmeta = tk.Label(tab, text="—", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED)
+        self.lb_lstmeta.pack(anchor="w", padx=14, pady=(0, 8))
+
+    def _on_lst_click(self, event):
+        """点「选」列切换勾选。"""
+        row = self.tv_lst.identify_row(event.y)
+        col = self.tv_lst.identify_column(event.x)
+        if not row or col != "#1":
+            return "break"
+        cid = self.tv_lst.set(row, "cid")
+        if not cid:
+            return "break"
+        if self._all_mode_now:
+            # 当前是「全部会话」（含以后新增）。用户点掉任意一个，语义就变成
+            # 精确列表 —— 先把当前可见清单全装进来，再减掉他点掉的那个。
+            self._lst_checked = {x["chat_id"] for x in self._lst_items}
+            self._all_mode_now = False
+            for r in self.tv_lst.get_children():
+                self.tv_lst.set(r, "ck", "☑")
+        if cid in self._lst_checked:
+            self._lst_checked.discard(cid)
+            self.tv_lst.set(row, "ck", "☐")
+        else:
+            self._lst_checked.add(cid)
+            self.tv_lst.set(row, "ck", "☑")
+        self._update_sel_count()
+        return "break"
+
+    def _bulk(self, on: bool):
+        shown = self.tv_lst.get_children()
+        for row in shown:
+            cid = self.tv_lst.set(row, "cid")
+            if not cid:
+                continue
+            if on:
+                self._lst_checked.add(cid)
+                self.tv_lst.set(row, "ck", "☑")
+            else:
+                self._lst_checked.discard(cid)
+                self.tv_lst.set(row, "ck", "☐")
+        self._update_sel_count()
+
+    def _update_sel_count(self):
+        if self._all_mode_now:
+            self.lb_sel.configure(text="全部会话模式（含以后新增的群和好友）")
+        else:
+            self.lb_sel.configure(text="已勾选 %d 个" % len(self._lst_checked))
+
+    def _sync_lst_acc(self):
+        """给监听对象页选默认账号。
+
+        既不能挑「会话最多的号」（历史测试号几百个会话，会把真正在用的号挤到
+        后面），也不能看账本 —— 新号可能还没收到过一单，records.jsonl 都不存在。
+        采集端最近一次上报会话清单的那个号才是此刻在用的，按 received_at 排。
+        """
+        accs = msb_view.all_accounts()
+        self.lst_acc_sel.configure(values=accs)
+        if self.lst_acc_var.get() in accs:
+            return
+        def sync_at(a):
+            return str(msb_view.contacts_doc(a).get("received_at") or "")
+        self.lst_acc_var.set(max(accs, key=sync_at) if accs else "")
+
+    def _on_lst_acc(self):
+        self.render_list()
+
+    def render_list(self):
+        for row in self.tv_lst.get_children():
+            self.tv_lst.delete(row)
+        self._sync_lst_acc()
+        acc = self.lst_acc_var.get()
+        if not acc:
+            self.lb_lstmeta.configure(
+                text="还没有任何采集端上报过会话清单。先去采集端勾一次「监听全部会话」并保存，"
+                     "过一会儿这里就会自动出现清单。")
+            self._update_sel_count()
+            return
+        kw = (self.v_kw.get() or "").strip()
+        kind = self.v_kind.get()
+        if kind == "全部类型":
+            kind = ""
+        res = msb_view.contact_rows(acc, kw, kind)
+        items = res["items"]
+        self._lst_items = items
+        self._all_mode_now = res["all_mode"]
+        # 精确模式下按文件里存的勾选回填；「全部会话」模式下不往集合里塞几百个
+        # id（一保存就把「含以后新增」的语义弄丢了），显示上照样全勾。
+        self._lst_checked = (set() if self._all_mode_now
+                            else {x["chat_id"] for x in items if x["selected"]})
+        for x in items:
+            ts = ""
+            if x["last_msg_time"]:
+                try:
+                    ts = time.strftime("%Y-%m-%d %H:%M",
+                                       time.localtime(float(x["last_msg_time"])))
+                except Exception:
+                    ts = ""
+            on = self._all_mode_now or (x["chat_id"] in self._lst_checked)
+            self.tv_lst.insert("", "end", values=(
+                "☑" if on else "☐",
+                x["name"], x["kind"], x["chat_id"], ts))
+        self.lb_lstmeta.configure(
+            text="账号 %s · 清单同步 %s · 下发版本 v%d · 生效中 %d 个 · 共 %d 个会话%s" % (
+                acc, res["received_at"] or "（采集端尚未上报）", res["version"],
+                res["targets_count"] if not res["all_mode"] else 0,
+                len(items),
+                "（当前是「全部会话」模式）" if res["all_mode"] else ""))
+        self._update_sel_count()
+
+    def load_contacts(self):
+        self._sync_lst_acc()
+        self.render_list()
+
+    def save_targets(self):
+        acc = self.lst_acc_var.get()
+        if not acc:
+            messagebox.showinfo("没有账号", "还没有采集端上报过会话清单，先让采集端连上并同步一次。")
+            return
+        if self._all_mode_now:
+            self._toast("当前就是「全部会话」模式，采集端已经在监听全部群和好友了，不用再保存。")
+            return
+        ids = sorted(self._lst_checked)
+        if not ids:
+            if not messagebox.askyesno(
+                    "一个都没勾", "当前没有勾选任何对象，保存后采集端会停止监听所有会话。\n确定继续？"):
+                return
+        port = int(self.v_port.get() or 8899)
+        if not health(port)[0]:
+            messagebox.showerror("服务没在跑", "保存监听配置需要通过服务端接口，请先「启动服务」。")
+            return
+        d = api_post("/api/targets", {"targets": ids, "account": acc}, port)
+        if not d.get("ok"):
+            messagebox.showerror("保存失败", str(d.get("error") or "未知错误"))
+            return
+        self._toast("已保存 %s 个监听对象（版本 v%s），采集端约 60 秒内生效。" %
+                    (d.get("count"), d.get("version")))
+        self.render_list()
+
+    def save_all_mode(self):
+        """切回「全部会话」：以后新加的群/好友也自动监听，公众号由采集端剔除。"""
+        acc = self.lst_acc_var.get()
+        if not acc:
+            messagebox.showinfo("没有账号", "还没有采集端上报过会话清单。")
+            return
+        if not messagebox.askyesno(
+                "确认", "改成「全部会话」后，采集端会监听这个号的所有群和好友"
+                        "（包括以后新增的），公众号仍会自动剔除。\n\n继续？"):
+            return
+        port = int(self.v_port.get() or 8899)
+        if not health(port)[0]:
+            messagebox.showerror("服务没在跑", "保存监听配置需要通过服务端接口，请先「启动服务」。")
+            return
+        d = api_post("/api/targets", {"targets": ["*"], "account": acc}, port)
+        if not d.get("ok"):
+            messagebox.showerror("保存失败", str(d.get("error") or "未知错误"))
+            return
+        self._toast("已切回「全部会话」模式（版本 v%s），采集端约 60 秒内生效。"
+                    % d.get("version"))
+        self.render_list()
+
+    # ---------- 配置 ----------
+    def _build_tab_cfg(self, tab):
+        # 125% 缩放的笔记本上窗口高度有限，配置项一多底部就被裁，
+        # 所以整页放进可滚动 Canvas：宁可多滚一下，也不让字段够不着。
+        holder = tk.Frame(tab, bg=CLR_BG)
+        holder.pack(fill="both", expand=True)
+        canvas = tk.Canvas(holder, bg=CLR_BG, highlightthickness=0)
+        vsb = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        wrap = tk.Frame(canvas, bg=CLR_BG)
+        win = canvas.create_window((0, 10), window=wrap, anchor="nw")
+        wrap.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(win, width=max(1, e.width - 8)))
+
+        def _wheel(e):
+            if wrap.winfo_reqheight() <= canvas.winfo_height():
+                return
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+        canvas.bind_all("<MouseWheel>", _wheel)
+
+        def group(title):
+            g = tk.LabelFrame(wrap, text=" %s " % title, font=FONT_B, bg=CLR_BG,
+                              fg="#111827", bd=1, relief="groove")
+            g.pack(fill="x", pady=(0, 10))
+            return g
+
+        g1 = group("采集端与验签")
+        self.v_secret = self._row(g1, "推送密钥", "wx_push_secret",
+                                  "就是 WxPushTool 授权时下发的那串 final_secret，两端必须一致", 0)
+        self.v_custs = self._row(g1, "多客户密钥", "wx_account_secrets",
+                                 "格式 C0001:密钥A,C0002:密钥B；只有接多个采集端时才填", 1)
+        self.v_port = self._row(g1, "端口", "port",
+                                "默认 8899。改完要停止再启动才生效；采集端的推送地址也要跟着改", 2)
+
+        g2 = group("大模型（AI 解析）")
+        self.v_key = self._row(g2, "API Key", "llm_api_key",
+                               "填你自己的大模型 Key（阿里云百炼 / 任意 OpenAI 兼容端点）", 0)
+        self.v_base = self._row(g2, "接口地址", "llm_base_url",
+                                "兼容 OpenAI 协议的 /v1 地址，一般不用改", 1)
+        self.v_model = self._row(g2, "模型名", "llm_model",
+                                 "默认 qwen3.8-27b；换成别的模型名也行", 2)
+        row = tk.Frame(g2, bg=CLR_BG)
+        row.pack(fill="x", pady=4, padx=8)
+        tk.Label(row, text="思考模式", font=FONT, bg=CLR_BG, fg="#374151",
+                 width=12, anchor="w").pack(side="left")
+        self.v_think = tk.BooleanVar(value=bool(int(self.cfg.get("llm_thinking") or 0)))
+        tk.Checkbutton(row, text="开启（慢但更啰嗦；实测关掉更快更准）", variable=self.v_think,
+                       font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, activebackground=CLR_BG,
+                       selectcolor=CLR_BG).pack(side="left")
+
+        tk.Label(wrap, text="改完点左下「保存配置」（本页底部按钮条）；"
+                            "正在跑的服务要「停止 → 启动」才会用上新配置。",
+                 font=FONT_S, bg=CLR_BG, fg=CLR_MUTED).pack(anchor="w", pady=(2, 0))
+        tk.Label(wrap, text="配置文件：%s" % config_path(), font=FONT_S,
+                 bg=CLR_BG, fg=CLR_MUTED).pack(anchor="w")
+        tk.Button(wrap, text="保存配置", font=FONT_B, bg=CLR_BLUE, fg="white",
+                  relief="flat", bd=0, cursor="hand2", command=self.save_cfg, width=14
+                  ).pack(anchor="w", pady=(10, 0))
+
+    def _row(self, parent, label, key, hint, idx):
+        row = tk.Frame(parent, bg=CLR_BG)
+        row.pack(fill="x", pady=(4, 0), padx=8)
+        tk.Label(row, text=label, font=FONT, bg=CLR_BG, fg="#374151",
+                 width=12, anchor="w").pack(side="left")
+        var = tk.StringVar(value=str(self.cfg.get(key, DEFAULTS.get(key, "")) or ""))
+        ent = tk.Entry(row, textvariable=var, font=FONT, relief="solid", bd=1,
+                       highlightthickness=0, width=56)
+        ent.pack(side="left", fill="x", expand=True)
+        var._entry = ent
+        if hint:
+            h = tk.Frame(parent, bg=CLR_BG)
+            h.pack(fill="x", padx=8)
+            tk.Label(h, text=hint, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED,
+                     anchor="w", justify="left").pack(side="left", padx=(100, 0))
+        return var
+
+    # ---------- 日志 ----------
+    def _build_tab_log(self, tab):
+        top = tk.Frame(tab, bg=CLR_BG)
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        tk.Label(top, text="当天服务端日志", font=FONT_B, bg=CLR_BG,
+                 fg="#111827").pack(side="left")
+        tk.Button(top, text="打开日志目录", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=self.open_logs
+                  ).pack(side="right", padx=4)
+        tk.Button(top, text="打开数据目录", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=self.open_data
+                  ).pack(side="right", padx=4)
+        tk.Button(top, text="刷新", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=self.refresh_log
+                  ).pack(side="right", padx=4)
+
+        body = tk.Frame(tab, bg=CLR_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        self.txt = tk.Text(body, font=("Consolas", 9), bg="#ffffff", fg="#374151",
+                           relief="solid", bd=1, wrap="none")
+        vsb = ttk.Scrollbar(body, orient="vertical", command=self.txt.yview)
+        self.txt.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.txt.pack(side="left", fill="both", expand=True)
+        self.txt.configure(state="disabled")
+
+    # ---- 状态刷新 ----
+    def _on_tab(self, event=None):
+        idx = self.nb.current()
+        if idx == 0:
+            self.refresh_overview()
+        elif idx == 2:
+            self.refresh_log()
+
+    def _on_acc_change(self, event=None):
+        v = (self.acc_var.get() or "").strip()
+        self.acc = "" if v.startswith("全部账号") else v
+        self.refresh_overview()
+
+    def _sync_accounts(self):
+        """账号下拉：账号变了才重建选项，避免每次刷新都把用户的选择冲掉。"""
+        accs = msb_view.all_accounts()
+        sig = tuple(accs)
+        if sig != self._acc_sig:
+            self._acc_sig = sig
+            if len(accs) <= 1:
+                self.acc_sel.configure(values=[])
+                self.acc = accs[0] if accs else ""
+                self.acc_var.set(self.acc)
+            else:
+                self.acc_sel.configure(values=["全部账号（合计）"] + list(accs))
+                if self.acc and self.acc not in accs:
+                    self.acc = ""
+                self.acc_var.set(self.acc or "全部账号（合计）")
+        elif not self.acc_var.get():
+            self.acc_var.set(self.acc or "全部账号（合计）")
+
+    def refresh_overview(self):
+        try:
+            s = msb_view.summary(self.acc)
+        except Exception as e:
+            self.lb_grand.configure(text="—")
+            self._toast("读数据出错：%r" % (e,))
+            return
+        self._sync_accounts()
+        self.lb_grand.configure(text=fmt_money(s["grand_total"]))
+        self.lb_zyear.configure(text="%s年 · %s" % (s["zodiac_year"], s["zodiac"]))
+        self.lb_kbets.configure(text=str(s["numbers_with_bets"]))
+        self.lb_krec.configure(text=str(s["records_today"]))
+        self.lb_kunp.configure(text=str(s["unparsed_today"]))
+        self.btn_unp.configure(text="未解析 %d" % len(s["unparsed"]))
+
+        self._render_grid(s["grid"])
+
+        risk_sig = tuple((x["rank"], x["num"], x["zodiac"], x["amount"], x["share"])
+                         for x in s["risk"])
+        if risk_sig != self._risk_sig:
+            self._risk_sig = risk_sig
+            for row in self.tv_risk.get_children():
+                self.tv_risk.delete(row)
+            for x in s["risk"]:
+                self.tv_risk.insert("", "end",
+                                    values=(x["rank"], x["num"], x["zodiac"],
+                                            fmt_money(x["amount"]), "%s%%" % x["share"]),
+                                    tags=("hot",) if x["rank"] == 1 else ())
+
+        rec_sig = tuple((str(x.get("ts") or ""), str(x.get("chat") or x.get("chat_name") or ""),
+                         str(x.get("sender_name") or x.get("sender") or ""),
+                         str(x.get("text") or ""), x.get("numbers") or 0,
+                         x.get("total") or 0, x.get("grand_total") or 0)
+                        for x in s["recent"])
+        if rec_sig != self._rec_sig:
+            self._rec_sig = rec_sig
+            for row in self.tv_rec.get_children():
+                self.tv_rec.delete(row)
+            for x in s["recent"]:
+                self.tv_rec.insert("", "end", values=(
+                    str(x.get("ts") or "")[:16],
+                    str(x.get("chat") or x.get("chat_name") or "")[:24],
+                    str(x.get("sender_name") or x.get("sender") or "")[:14],
+                    str(x.get("text") or "")[:70],
+                    x.get("numbers") or 0,
+                    fmt_money(x.get("total")),
+                    fmt_money(x.get("grand_total")),
+                ), tags=("who",))
+
+    def _refresh_status(self):
+        try:
+            port = int(self.v_port.get() or 8899)
+        except ValueError:
+            port = 8899
+        ok, why = health(port)
+        if ok:
+            self.lb_state.configure(text="● 运行中", fg=CLR_OK)
+            self.lb_hint.configure(text="服务端在 %d 端口等着采集端推送" % port)
+        else:
+            pid = running_pid()
+            if pid and _pid_alive(pid):
+                self.lb_state.configure(text="● 启动中", fg="#b8860b")
+                self.lb_hint.configure(text="进程在，但端口还没响应（前几秒正常）")
+            else:
+                self.lb_state.configure(text="● 未运行", fg=CLR_BAD)
+                self.lb_hint.configure(text='点左下「启动服务」；窗口关掉不影响后台')
+        self.lb_port.configure(text=str(port))
+        self.lb_dash.configure(text="http://127.0.0.1:%d/" % port)
+        try:
+            s = msb_view.summary("")
+            self.lb_sum.configure(text="%d 个 / %s 元 / 今日 %d 笔" % (
+                len(s["accounts"]), fmt_money(s["grand_total"]), s["records_today"]))
+        except Exception:
+            self.lb_sum.configure(text="—")
+
+    def refresh_log(self):
+        today = time.strftime("%Y-%m-%d")
+        p = msb_view.logs_dir() / ("bot_%s.log" % today)
+        self.txt.configure(state="normal")
+        self.txt.delete("1.0", "end")
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()[-120:]
+                self.txt.insert("end", "".join(lines))
+            except Exception as e:
+                self.txt.insert("end", "读日志失败：%r\n" % (e,))
+        else:
+            self.txt.insert("end", "今天还没有日志（服务还没启动过）\n")
+        self.txt.see("end")
+        self.txt.configure(state="disabled")
+        # 页签刚切过来时 Text 还没排完版，强制走一次重绘，否则抓出来的
+        # 窗口正文是空白（PrintWindow 拿到未绘制的帧）。
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+    def _loop(self):
+        self.root.after(5000, self._loop)
+        try:
+            self._refresh_status()
+            # 只在总览页自动刷；监听对象页怕把正在勾的选择冲掉
+            try:
+                if self.nb.current() == 0:
+                    self.refresh_overview()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # ---- 动作 ----
+    def show_unparsed(self):
+        s = msb_view.summary(self.acc)
+        rows = s["unparsed"]
+        win = tk.Toplevel(self.root)
+        win.title("未解析（需人工核对）%d 条" % len(rows))
+        win.configure(bg=CLR_BG)
+        win.geometry("820x420")
+        tk.Label(win, text="AI 没解析出来的原文，原文同时留在 unparsed.jsonl 里。",
+                 font=FONT_S, bg=CLR_BG, fg=CLR_MUTED).pack(anchor="w", padx=12, pady=(10, 4))
+        body = tk.Frame(win, bg=CLR_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        cols = ("ts", "chat", "text", "reason")
+        tv = ttk.Treeview(body, columns=cols, show="headings")
+        for c, t, w, a in (("ts", "时间", 130, "w"), ("chat", "会话", 140, "w"),
+                           ("text", "原文", 330, "w"), ("reason", "原因", 180, "w")):
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor=a)
+        vsb = ttk.Scrollbar(body, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        if not rows:
+            tv.insert("", "end", values=("—", "—", "没有未解析的单", "—"))
+        for x in rows:
+            tv.insert("", "end", values=(str(x.get("ts") or "")[:16],
+                                         str(x.get("chat") or x.get("chat_name") or "")[:20],
+                                         str(x.get("text") or "")[:80],
+                                         str(x.get("reason") or "")[:40]))
+
+    def save_cfg(self):
+        try:
+            port = int(self.v_port.get() or 8899)
+            if not (1 <= port <= 65535):
+                raise ValueError("端口要在 1~65535 之间")
+        except ValueError as e:
+            messagebox.showerror("端口填错了", str(e))
+            return
+        write_cfg({
+            "port": port,
+            "wx_push_secret": self.v_secret.get().strip(),
+            "wx_account_secrets": self.v_custs.get().strip(),
+            "llm_api_key": self.v_key.get().strip(),
+            "llm_base_url": self.v_base.get().strip(),
+            "llm_model": self.v_model.get().strip(),
+            "llm_thinking": 1 if self.v_think.get() else 0,
+        })
+        self.cfg = read_cfg()
+        self._toast("配置已保存（正在跑的服务要停止再启动才生效）")
+
+    def start_server(self):
+        port = int(self.v_port.get() or 8899)
+        if health(port)[0]:
+            messagebox.showinfo("已经在跑", "服务端已经在 %d 端口运行了，不用重复启动。" % port)
+            return
+        pid = running_pid()
+        if pid and _pid_alive(pid):
+            messagebox.showinfo("正在启动", "已经有一个启动中的进程（PID %d），等几秒再看。" % pid)
+            return
+        missing = []
+        if not self.v_key.get().strip():
+            missing.append("大模型 API Key")
+        if not self.v_secret.get().strip() and not self.v_custs.get().strip():
+            missing.append("推送密钥")
+        if missing:
+            messagebox.showerror("配置还没填",
+                                 "缺这些必填项，服务起不来：\n\n  · " + "\n  · ".join(missing) +
+                                 "\n\n先在本页填好，点「保存配置」。")
+            return
+
+        cmd = self_cmd() + ["--headless", "--quiet"]
+        log_dir = msb_view.logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        out = open(log_dir / ("console_%s.log" % time.strftime("%Y%m%d")), "a",
+                   encoding="utf-8")
+        try:
+            self._proc = subprocess.Popen(cmd, cwd=str(app_dir()),
+                                          stdout=out, stderr=subprocess.STDOUT,
+                                          creationflags=0x08000000)   # 不弹黑窗
+        except Exception as e:
+            messagebox.showerror("启动失败", "拉不起后台服务：\n\n%r" % (e,))
+            return
+        try:
+            pid_path().parent.mkdir(parents=True, exist_ok=True)
+            pid_path().write_text(str(self._proc.pid), encoding="utf-8")
+        except Exception:
+            pass
+        self._toast("已启动，正在等端口响应…")
+        self.root.after(1200, self._after_start)
+
+    def _after_start(self):
+        port = int(self.v_port.get() or 8899)
+        if health(port)[0]:
+            self._toast("服务端已就绪：http://127.0.0.1:%d/" % port)
+        else:
+            self._toast("还没响应，稍等几秒；不行就看「日志」页")
+        self._refresh_status()
+
+    def stop_server(self):
+        pid = running_pid()
+        killed = False
+        if pid and _pid_alive(pid):
+            try:
+                # 用内核 API 结束，不拉 taskkill（Windows 11 会闪黑窗）
+                import ctypes
+                k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                h = k32.OpenProcess(0x0001, False, int(pid))   # PROCESS_TERMINATE
+                if h:
+                    k32.TerminateProcess(h, 0)
+                    k32.CloseHandle(h)
+                    killed = True
+            except Exception:
+                pass
+        try:
+            pid_path().unlink()
+        except Exception:
+            pass
+        if killed:
+            self._toast("已停止")
+        else:
+            port = int(self.v_port.get() or 8899)
+            if health(port)[0]:
+                messagebox.showinfo("没找到进程",
+                                    "端口 %d 还有响应，但没找到本窗口启动的进程。\n"
+                                    "可能是别的进程占着，用任务管理器结束 MarkSixBot.exe 即可。" % port)
+            else:
+                self._toast("已经没在跑了")
+        self.root.after(1000, self._refresh_status)
+
+    def do_backup(self):
+        port = int(self.v_port.get() or 8899)
+        if not health(port)[0]:
+            messagebox.showerror("服务没在跑", "备份要通过服务端接口，请先「启动服务」。")
+            return
+        d = api_post("/backup", None, port)
+        if d.get("ok"):
+            self._toast("已备份 %s 个账号的账本" % d.get("count"))
+        else:
+            messagebox.showerror("备份失败", str(d.get("error") or "未知错误"))
+
+    def do_reset(self):
+        if not self.acc:
+            messagebox.showinfo("先选账号",
+                                "「清空」只清一个账号。有多个账号时请先在「总览」页右上角选一个号。")
+            return
+        if not messagebox.askyesno(
+                "确认清空", "确定清空账号「%s」的累计数据？\n清空前建议先点「备份」。" % self.acc):
+            return
+        port = int(self.v_port.get() or 8899)
+        if not health(port)[0]:
+            messagebox.showerror("服务没在跑", "清空要通过服务端接口，请先「启动服务」。")
+            return
+        d = api_post("/reset?account=%s" % self.acc, None, port)
+        if d.get("ok"):
+            self._toast("已清空 %s" % self.acc)
+            self.refresh_overview()
+        else:
+            messagebox.showerror("清空失败", str(d.get("error") or "未知错误"))
+
+    def open_dashboard(self):
+        port = int(self.v_port.get() or 8899)
+        os.startfile("http://127.0.0.1:%d/" % port)
+
+    def open_logs(self):
+        d = msb_view.logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(d))
+
+    def open_data(self):
+        d = data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(d))
+
+    # ---- 开机自启 ----
+    def _autorun_on(self) -> bool:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+                winreg.QueryValueEx(k, "MarkSixBot")
+                return True
+        except Exception:
+            return False
+
+    def toggle_autorun(self):
+        try:
+            import winreg
+            key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
+                if self.v_auto.get():
+                    # 用完整命令行，不能只取 [0]：源码模式下 self_cmd() 是
+                    # [python.exe, main.py]，只取第一个会把 main.py 丢掉。
+                    parts = self_cmd() + ["--headless", "--quiet"]
+                    reg = " ".join('"%s"' % p if (" " in p or not p) else p for p in parts)
+                    winreg.SetValueEx(k, "MarkSixBot", 0, winreg.REG_SZ, reg)
+                    self._toast("已设置开机自动启动（后台静默，无窗口）")
+                else:
+                    try:
+                        winreg.DeleteValue(k, "MarkSixBot")
+                    except Exception:
+                        pass
+                    self._toast("已取消开机自动启动")
+        except Exception as e:
+            messagebox.showerror("设置失败", "改注册表失败：\n\n%r" % (e,))
+            self.v_auto.set(self._autorun_on())
+
+    # ---- 小工具 ----
+    def _toast(self, msg):
+        self.lb_hint.configure(text=msg)
+
+
+def run():
+    root = tk.Tk()
+    try:
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    try:
+        ttk.Style().theme_use("clam")
+    except Exception:
+        pass
+    MainWindow(root)
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    w, h = min(1180, int(sw * 0.94)), min(820, int(sh * 0.90))
+    root.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 4)))
+    try:
+        root.attributes("-topmost", True)
+        root.after(2000, lambda: root.attributes("-topmost", False))
+    except Exception:
+        pass
+    root.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())
