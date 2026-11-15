@@ -41,6 +41,7 @@ from typing import Dict, List, Tuple
 import bet_rules
 # 玩法表 + 选号逻辑跟控制台窗口共用一份，网页版不会算出第二个结果
 import manual_plays
+import msb_view
 import msb_paths
 from msb_paths import APP_DIR, DATA_DIR, CONFIG_PATH
 
@@ -2396,119 +2397,13 @@ def _count_today_multi(accs: List[str], key: str) -> int:
     return sum(_count_today(account_files(a)[key]) for a in accs)
 
 
-def _extract_zodiacs(text: str) -> List[str]:
-    """从原文里认出哪几个肖。只认 12 个生肖字，跟号码、金额不会撞。"""
-    t = str(text or "")
-    return [z for z in manual_plays.ZODIAC_ORDER if z in t]
-
-
-_CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6}
-
-
-def _lian_len(text: str) -> int:
-    """连肖位数：二/三/四/五 或 2/3/4/5；没写就按二连。"""
-    m = re.search(r"([一二两三四五六1-6])\s*连肖", str(text or ""))
-    if not m:
-        return 2
-    ch = m.group(1)
-    return _CN_NUM.get(ch) or int(ch)
-
-
-def _board_items(account=None, market: str = "MO") -> List[dict]:
-    if account:
-        return list(load_others(account, market).get("items") or [])
-    out = []
-    for a in all_accounts():
-        out += list(load_others(a, market).get("items") or [])
-    return out
-
-
 def zodiac_board(account=None, market: str = "MO") -> dict:
-    """总览用：生肖金额表（平特 + 连肖合并一列）+ 组合注（二中二/三中三单独一栏）。
+    """生肖金额表（平特 + 连肖合并）+ 组合注（二中二/三中三）的展示归集。
 
-    只读、只做展示归集，不改账、不动解析：
-    - 平特 / 连肖：原文里的肖都记上。带「各」= 每个肖各拿整笔；不带「各」= 整笔在几个肖
-      之间分摊（抹到分，余数给第一个肖，跟手工记账窗口的预览算法一致）。
-    - 二中二 / 三中三：整笔算一注，不摊到单肖，单独进组合注表。
+    口径只有一份：msb_view.zodiac_board —— 桌面控制台的总览和网页看板都调它，
+    免得两边算法各走各的、数字对不上。
     """
-    mapping = current_zodiac_mapping()
-    rows = []
-    for z in manual_plays.ZODIAC_ORDER:
-        nums = mapping.get(z, [])
-        rows.append({"zodiac": z, "nums": " ".join(str(n) for n in nums),
-                     "amount": 0.0, "pingte": 0.0, "lianxiao": 0.0})
-    idx = {r["zodiac"]: r for r in rows}
-
-    items = _board_items(account, market)
-    combo, unknown = [], []
-    tot = {"board": 0.0, "combo": 0.0, "unknown": 0.0}
-
-    for it in items:
-        text = str(it.get("text") or "")
-        try:
-            amt = round(float(it.get("amount") or 0), 2)
-        except Exception:
-            amt = 0.0
-        play = str(it.get("play") or "")
-        zs = _extract_zodiacs(text)
-        is_combo = (play == "zhong"
-                    or ("中" in text and "连肖" not in text and "平" not in text))
-        if is_combo:
-            combo.append({
-                "text": text,
-                "amount": amt,
-                "zodiacs": zs,
-                "ts": str(it.get("ts") or ""),
-                "need": ("6 个平特号同时有 " + "、".join(zs)) if zs else "按原文核对",
-            })
-            tot["combo"] = round(tot["combo"] + amt, 2)
-            continue
-        if not zs:
-            unknown.append({"text": text, "amount": amt,
-                            "ts": str(it.get("ts") or "")})
-            tot["unknown"] = round(tot["unknown"] + amt, 2)
-            continue
-        kind = "lianxiao" if (play == "lianxiao" or "连肖" in text) else "pingte"
-        if kind == "lianxiao":
-            # 连肖是"从写的那一个肖往后连 N 个"（鼠二连肖 = 鼠+牛），
-            # 不是文中出现了几个肖。位数从「二连肖 / 3连肖」里读，默认二连。
-            n = _lian_len(text)
-            if len(zs) < n:
-                start = zs[0] if zs else manual_plays.ZODIAC_ORDER[0]
-                i = (manual_plays.ZODIAC_ORDER.index(start)
-                     if start in manual_plays.ZODIAC_ORDER else 0)
-                zs = [manual_plays.ZODIAC_ORDER[(i + k) % 12] for k in range(n)]
-        n = len(zs)
-        # 带「各」= 每个肖各拿（文本里「各」后面那个数才是每肖金额，账上记的是整笔），
-        # 不带「各」= 这一笔在几个肖之间分摊。
-        m_each = re.search(r"各\s*(\d+(?:\.\d+)?)", text)
-        each_one = None
-        if m_each:
-            try:
-                each_one = float(m_each.group(1))
-            except Exception:
-                each_one = None
-        if each_one is not None:
-            per = {z: round(each_one, 2) for z in zs}
-        else:
-            base = float(int(amt / n * 100)) / 100.0      # 抹到分，不四舍五入
-            per = {z: base for z in zs}
-            per[zs[0]] = round(amt - base * (n - 1), 2)    # 余数给第一个肖
-        for z in zs:
-            r = idx.get(z)
-            if not r:
-                continue
-            r[kind] = round(r[kind] + per[z], 2)
-            r["amount"] = round(r["amount"] + per[z], 2)
-        tot["board"] = round(tot["board"] + sum(per.values()), 2)
-
-    return {
-        "rows": rows,
-        "combo": combo[-12:],
-        "unknown": unknown[-6:],
-        "totals": tot,
-        "count": len(items),
-    }
+    return msb_view.zodiac_board(account or "", market)
 
 
 @app.route("/api/dashboard", methods=["GET"])

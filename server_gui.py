@@ -546,7 +546,7 @@ class MainWindow:
         # 权重再小也压不下来（实测给 6:7 也还是 55%）。
         # 左上：澳门、香港两个号码盘，左澳右港同时显示
         garea = tk.Frame(left, bg=CLR_BG)
-        garea.place(x=0, y=0, relwidth=1.0, relheight=0.49)
+        garea.place(x=0, y=0, relwidth=1.0, relheight=0.40)
         for mk, title in (("MO", " 澳门 号码盘 "), ("HK", " 香港 号码盘 ")):
             gp = tk.LabelFrame(garea, text=title, font=FONT_B, bg=CLR_BG,
                                fg="#111827", bd=1, relief="groove")
@@ -555,10 +555,49 @@ class MainWindow:
             holder.pack(fill="both", expand=True, padx=5, pady=5)
             self.grid_holder[mk] = holder
 
-        # 左下：最近记账，钉在底部，高度占 50%，宽度就到排序区起点
+        # 中段：生肖金额（平特 + 连肖合并成一列）+ 组合注（二中二/三中三）。
+        # 这两类钱不落 49 号盘，之前只能在「不计号」那个总数里看到一个合计。
+        zbp = tk.LabelFrame(left,
+                            text=" 生肖金额（平特 + 连肖合并一列）· 组合注（二中二 / 三中三） ",
+                            font=FONT_B, bg=CLR_BG, fg="#111827", bd=1, relief="groove")
+        zbp.place(x=0, rely=0.40, relwidth=1.0, relheight=0.13)
+        zin = tk.Frame(zbp, bg=CLR_BG)
+        zin.pack(fill="both", expand=True, padx=6, pady=(3, 2))
+        self._zx_cells = {}
+        self._zx_total = {}
+        for mk, name in (("MO", "澳门"), ("HK", "香港")):
+            rf = tk.Frame(zin, bg=CLR_BG)
+            rf.pack(fill="x", pady=1)
+            tk.Label(rf, text=name, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED,
+                     width=4, anchor="w").pack(side="left")
+            t = tk.Label(rf, text="", font=FONT_B, bg=CLR_BG, fg="#111827",
+                         width=12, anchor="e")
+            t.pack(side="right", padx=(4, 0))
+            self._zx_total[mk] = t
+            cw = tk.Frame(rf, bg=CLR_BG)
+            cw.pack(side="left", fill="x", expand=True)
+            for c in range(12):
+                cw.grid_columnconfigure(c, weight=1, uniform="zxc")
+            self._zx_cells[mk] = []
+            for c, z in enumerate(msb_view.ZODIAC_ANIMALS):
+                f = tk.Frame(cw, bg="#fafbfc", highlightbackground="#e3e7ec",
+                             highlightthickness=1)
+                f.grid(row=0, column=c, sticky="nsew", padx=1)
+                tk.Label(f, text=z, font=("Microsoft YaHei UI", 9), bg="#fafbfc",
+                         fg="#6b7280").pack(side="left", padx=(4, 2))
+                amt = tk.Label(f, text="", font=("Consolas", 11, "bold"),
+                               bg="#fafbfc", fg=CLR_RED)
+                amt.pack(side="left", padx=(0, 4))
+                self._zx_cells[mk].append(amt)
+        # 组合注按整注记，不进生肖表：一行文字列出来，多了一行截断
+        self.lb_combo = tk.Label(zbp, text="组合注：—", font=FONT_S, bg=CLR_BG,
+                                 fg=CLR_MUTED, anchor="w")
+        self.lb_combo.pack(fill="x", padx=8, pady=(1, 3))
+
+        # 左下：最近记账，钉在底部，高度占 51%，宽度就到排序区起点
         bp = tk.LabelFrame(left, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
                            fg="#111827", bd=1, relief="groove")
-        bp.place(x=0, rely=1.0, anchor="sw", relwidth=1.0, relheight=0.50)
+        bp.place(x=0, rely=1.0, anchor="sw", relwidth=1.0, relheight=0.47)
 
         # 过滤条：按期看。选项是具体三个期（本期 / 前一期 / 前二期），
         # 不是「最近 N 期」这种含糊说法 —— 选中哪一期就只显示那一期。
@@ -685,6 +724,56 @@ class MainWindow:
         # 画完立刻按当前尺寸定一次字号，再把缩放事件挂上
         holder.bind("<Configure>", lambda _e, mk=market: self._rescale_grid(mk))
         self._rescale_grid(market)
+
+    def _render_zxbar(self, boards):
+        """生肖金额（平特 + 连肖合并一列）+ 组合注。
+
+        12 个格子 × 2 本盘每 5 秒重画一次就是满屏闪，先比数值指纹。
+        """
+        sig = []
+        for mk in ("MO", "HK"):
+            b = boards.get(mk) or {}
+            sig.append(tuple((r["zodiac"], r["amount"])
+                             for r in (b.get("rows") or [])))
+            sig.append(tuple((str(c.get("text") or ""), c.get("amount"))
+                             for c in (b.get("combo") or [])))
+        sig = tuple(sig)
+        if sig == getattr(self, "_zx_sig", None):
+            return
+        self._zx_sig = sig
+
+        for mk in ("MO", "HK"):
+            b = boards.get(mk) or {}
+            rows = b.get("rows") or []
+            for i, al in enumerate(self._zx_cells.get(mk) or []):
+                amt = float(rows[i].get("amount") or 0) if i < len(rows) else 0.0
+                al.configure(text=fmt_money(amt) if amt else "",
+                             fg=CLR_RED if amt else CLR_GREY)
+            t = self._zx_total.get(mk)
+            if t is not None:
+                board_tot = float((b.get("totals") or {}).get("board") or 0)
+                combo_tot = float((b.get("totals") or {}).get("combo") or 0)
+                t.configure(text="合计 %s" % fmt_money(board_tot)
+                            + (" ＋组合 %s" % fmt_money(combo_tot)
+                               if combo_tot else ""))
+
+        # 组合注不摊进生肖表，按整注单列。条数多就只列前 5 条 + 省略号
+        parts, n, combo_sum = [], 0, 0.0
+        for mk, tag in (("MO", "澳"), ("HK", "港")):
+            for c in (boards.get(mk) or {}).get("combo") or []:
+                n += 1
+                combo_sum += float(c.get("amount") or 0)
+                if len(parts) < 5:
+                    parts.append("%s%s %s" % (tag, c.get("text") or "",
+                                              fmt_money(c.get("amount") or 0)))
+        if n:
+            txt = "组合注 %d 注 · 合计 %s 元 ｜ %s" % (
+                n, fmt_money(combo_sum), " ｜ ".join(parts))
+            if n > len(parts):
+                txt += " ｜ …"
+        else:
+            txt = "组合注：本期没有二中二 / 三中三"
+        self.lb_combo.configure(text=txt)
 
     def _rescale_grid(self, market):
         """按格子实际高度重算号码盘字号。
@@ -1417,6 +1506,13 @@ class MainWindow:
         grids = s.get("grids") or {}
         self._render_grid("MO", grids.get("MO") or [])
         self._render_grid("HK", grids.get("HK") or [])
+
+        # 生肖金额表 + 组合注：不落号码盘的钱，按生肖摊开看
+        try:
+            boards = {mk: msb_view.zodiac_board(self.acc, mk) for mk in ("MO", "HK")}
+        except Exception:
+            boards = {}
+        self._render_zxbar(boards)
 
         # 两本风险榜：澳门在上、香港在下，有金额的号全部列出
         risks = s.get("risks") or {}

@@ -12,6 +12,7 @@
 """
 
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -234,6 +235,110 @@ def market_totals(account: str = "") -> dict:
     out["ALL"] = {k: round(out["MO"][k] + out["HK"][k], 2)
                   for k in ("board", "flat", "total")}
     return out
+
+
+# ---------------- 生肖注（平特 / 连肖 / 二中二 / 三中三） ----------------
+_CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+
+
+def others_items(account: str = "", market: str = "MO") -> list:
+    """不计号的钱逐条明细（平特整肖 / 连肖 / 二中二…）。空账号 = 所有账号。"""
+    ms = ["MO", "HK"] if market == "ALL" else [market]
+    accs = [account] if account else all_accounts()
+    out = []
+    for acc in accs:
+        for m in ms:
+            d = read_json(state_dir() / acc / _others_file(m), None)
+            if isinstance(d, dict):
+                out += [x for x in (d.get("items") or []) if isinstance(x, dict)]
+    return out
+
+
+def extract_zodiacs(text: str) -> list:
+    """原文里出现了哪几个生肖字。12 个生肖字不会跟号码、金额撞。"""
+    t = str(text or "")
+    return [z for z in ZODIAC_ANIMALS if z in t]
+
+
+def lian_len(text: str) -> int:
+    """连肖位数：二/三/四/五 或 2/3/4/5；没写按二连。"""
+    m = re.search(r"([一二两三四五六1-6])\s*连肖", str(text or ""))
+    if not m:
+        return 2
+    return _CN_NUM.get(m.group(1)) or int(m.group(1))
+
+
+def zodiac_board(account: str = "", market: str = "MO") -> dict:
+    """总览用：12 生肖金额（平特与连肖合并一列）+ 组合注（二中二/三中三整注）。
+
+    只读推算，不改账。不落号码盘的注现在只存了 text 和 amount，这里按原文还原
+    「哪几个肖、每个肖多少钱」：
+      · 带「各」= 每个肖各拿「各」后面那个数（账上记的是整笔）
+      · 不带「各」= 整笔在几个肖之间分摊，抹到分，余数给第一个肖
+      · 连肖按「二/三/四/五连肖」补位，从写的那个肖按传统序往后连（鼠二连肖=鼠+牛）
+    等 bet_rules 改了口径、把这些字段直接存进 items，这里就改成读字段。
+    """
+    mapping = zodiac_year()[2]
+    rows = [{"zodiac": z,
+             "nums": " ".join(str(n) for n in mapping.get(z, [])),
+             "amount": 0.0, "pingte": 0.0, "lianxiao": 0.0}
+            for z in ZODIAC_ANIMALS]
+    idx = {r["zodiac"]: r for r in rows}
+
+    items = others_items(account, market)
+    combo, unknown = [], []
+    tot = {"board": 0.0, "combo": 0.0, "unknown": 0.0}
+
+    for it in items:
+        text = str(it.get("text") or "")
+        try:
+            amt = round(float(it.get("amount") or 0), 2)
+        except Exception:
+            amt = 0.0
+        play = str(it.get("play") or "")
+        zs = extract_zodiacs(text)
+        if play == "zhong" or ("中" in text and "连肖" not in text and "平" not in text):
+            combo.append({"text": text, "amount": amt, "zodiacs": zs,
+                          "ts": str(it.get("ts") or ""),
+                          "need": ("6 个平特号同时有 " + "、".join(zs))
+                                  if zs else "按原文核对"})
+            tot["combo"] = round(tot["combo"] + amt, 2)
+            continue
+        if not zs:
+            unknown.append({"text": text, "amount": amt,
+                            "ts": str(it.get("ts") or "")})
+            tot["unknown"] = round(tot["unknown"] + amt, 2)
+            continue
+        kind = "lianxiao" if (play == "lianxiao" or "连肖" in text) else "pingte"
+        if kind == "lianxiao":
+            n = lian_len(text)
+            if len(zs) < n:
+                i = ZODIAC_ANIMALS.index(zs[0])
+                zs = [ZODIAC_ANIMALS[(i + k) % 12] for k in range(n)]
+        n = len(zs)
+        m_each = re.search(r"各\s*(\d+(?:\.\d+)?)", text)
+        each_one = None
+        if m_each:
+            try:
+                each_one = float(m_each.group(1))
+            except Exception:
+                each_one = None
+        if each_one is not None:
+            per = {z: round(each_one, 2) for z in zs}
+        else:
+            base = float(int(amt / n * 100)) / 100.0
+            per = {z: base for z in zs}
+            per[zs[0]] = round(amt - base * (n - 1), 2)
+        for z in zs:
+            r = idx.get(z)
+            if not r:
+                continue
+            r[kind] = round(r[kind] + per[z], 2)
+            r["amount"] = round(r["amount"] + per[z], 2)
+        tot["board"] = round(tot["board"] + sum(per.values()), 2)
+
+    return {"rows": rows, "combo": combo[-12:], "unknown": unknown[-6:],
+            "totals": tot, "count": len(items)}
 
 
 def grid_from(data: dict) -> list:
