@@ -546,7 +546,7 @@ class MainWindow:
         # 权重再小也压不下来（实测给 6:7 也还是 55%）。
         # 左上：澳门、香港两个号码盘，左澳右港同时显示
         garea = tk.Frame(left, bg=CLR_BG)
-        garea.place(x=0, y=0, relwidth=1.0, relheight=0.40)
+        garea.place(x=0, y=0, relwidth=1.0, relheight=0.375)
         for mk, title in (("MO", " 澳门 号码盘 "), ("HK", " 香港 号码盘 ")):
             gp = tk.LabelFrame(garea, text=title, font=FONT_B, bg=CLR_BG,
                                fg="#111827", bd=1, relief="groove")
@@ -559,19 +559,20 @@ class MainWindow:
         # 这两类钱不落 49 号盘，之前只能在「不计号」那个总数里看到一个合计。
         zbp = tk.LabelFrame(left,
                             text=" 生肖金额（平特 + 连肖合并一列）· 组合注（二中二 / 三中三） ",
-                            font=FONT_B, bg=CLR_BG, fg="#111827", bd=1, relief="groove")
-        zbp.place(x=0, rely=0.40, relwidth=1.0, relheight=0.13)
+                            font=("Microsoft YaHei UI", 12, "bold"), bg=CLR_BG,
+                            fg="#111827", bd=1, relief="groove")
+        zbp.place(x=0, rely=0.375, relwidth=1.0, relheight=0.155)
         zin = tk.Frame(zbp, bg=CLR_BG)
-        zin.pack(fill="both", expand=True, padx=6, pady=(3, 2))
+        zin.pack(fill="both", expand=True, padx=6, pady=(4, 2))
         self._zx_cells = {}
         self._zx_total = {}
         for mk, name in (("MO", "澳门"), ("HK", "香港")):
             rf = tk.Frame(zin, bg=CLR_BG)
-            rf.pack(fill="x", pady=1)
-            tk.Label(rf, text=name, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED,
-                     width=4, anchor="w").pack(side="left")
-            t = tk.Label(rf, text="", font=FONT_B, bg=CLR_BG, fg="#111827",
-                         width=12, anchor="e")
+            rf.pack(fill="x", pady=2)
+            tk.Label(rf, text=name, font=("Microsoft YaHei UI", 12, "bold"),
+                     bg=CLR_BG, fg="#374151", width=4, anchor="w").pack(side="left")
+            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 12, "bold"),
+                         bg=CLR_BG, fg="#111827", width=12, anchor="e")
             t.pack(side="right", padx=(4, 0))
             self._zx_total[mk] = t
             cw = tk.Frame(rf, bg=CLR_BG)
@@ -583,16 +584,18 @@ class MainWindow:
                 f = tk.Frame(cw, bg="#fafbfc", highlightbackground="#e3e7ec",
                              highlightthickness=1)
                 f.grid(row=0, column=c, sticky="nsew", padx=1)
-                tk.Label(f, text=z, font=("Microsoft YaHei UI", 9), bg="#fafbfc",
-                         fg="#6b7280").pack(side="left", padx=(4, 2))
-                amt = tk.Label(f, text="", font=("Consolas", 11, "bold"),
+                # 生肖字放大加粗上色：12 格横排时一眼就能扫到哪几个肖有量
+                tk.Label(f, text=z, font=("Microsoft YaHei UI", 13, "bold"),
+                         bg="#fafbfc", fg=CLR_BLUE).pack(side="left", padx=(4, 2))
+                amt = tk.Label(f, text="", font=("Consolas", 13, "bold"),
                                bg="#fafbfc", fg=CLR_RED)
-                amt.pack(side="left", padx=(0, 4))
+                amt.pack(side="left", padx=(0, 3))
                 self._zx_cells[mk].append(amt)
         # 组合注按整注记，不进生肖表：一行文字列出来，多了一行截断
-        self.lb_combo = tk.Label(zbp, text="组合注：—", font=FONT_S, bg=CLR_BG,
-                                 fg=CLR_MUTED, anchor="w")
-        self.lb_combo.pack(fill="x", padx=8, pady=(1, 3))
+        self.lb_combo = tk.Label(zbp, text="组合注：—",
+                                 font=("Microsoft YaHei UI", 11), bg=CLR_BG,
+                                 fg="#4b5563", anchor="w")
+        self.lb_combo.pack(fill="x", padx=8, pady=(2, 4))
 
         # 左下：最近记账，钉在底部，高度占 51%，宽度就到排序区起点
         bp = tk.LabelFrame(left, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
