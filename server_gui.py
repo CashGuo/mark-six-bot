@@ -776,6 +776,10 @@ class MainWindow:
             for c in range(ncol):
                 cell = row["cells"][c] if c < len(row["cells"]) else None
                 if not cell:
+                    # 最后一列（49 号所在那一列）从第二行往下整列空着，
+                    # 留给「本盘合计」，别用空框占位，否则跟它叠在一起
+                    if total and c + 1 == ncol:
+                        continue
                     tk.Frame(holder, bg=CLR_BG).grid(row=r, column=c + 1, sticky="nsew")
                     continue
                 color = cell["color"]
@@ -792,17 +796,17 @@ class MainWindow:
                                font=FONT_AMT, bg="#fafbfc", fg="#111827", anchor="w")
                 amt.pack(side="left")
                 cells_out.append((num, amt))
-        # 本盘合计钉在最后一列的下半截：只有「马」那一行用得到最后一格（49 号），
-        # 下面十来行都空着，正好把澳门 / 香港各自的金额放在那儿，不用挤顶栏
+        # 本盘合计放进「49 号」那一列：只有马那一行用得到最后这一格，下面十行
+        # 整列空着，正好竖着写本盘金额，宽度跟 49 格一样，看着是同一列
         if total:
             box = tk.Frame(holder, bg=CLR_BG)
-            box.grid(row=max(len(rows) - 2, 1), column=ncol + 1, rowspan=2,
-                     sticky="nsew", padx=2, pady=2)
+            box.grid(row=1, column=ncol, rowspan=max(len(rows) - 1, 1),
+                     sticky="nsew", padx=1, pady=1)
             tk.Label(box, text="本盘合计", font=FONT_S, bg=CLR_BG,
-                     fg=CLR_MUTED).pack()
-            tk.Label(box, text=fmt_money(total),
+                     fg=CLR_MUTED).pack(expand=True)
+            tk.Label(box, text=zx_amt(total) or "0",
                      font=("Microsoft YaHei UI", 15, "bold"),
-                     bg=CLR_BG, fg=CLR_RED).pack()
+                     bg=CLR_BG, fg=CLR_RED).pack(expand=True)
         # 画完立刻按当前尺寸定一次字号，再把缩放事件挂上
         holder.bind("<Configure>", lambda _e, mk=market: self._rescale_grid(mk))
         self._rescale_grid(market)
