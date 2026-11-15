@@ -31,6 +31,7 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .btn.danger{color:var(--red);border-color:#e3b3ae;background:#fdf4f3}
 
 .grid2{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:10px;align-items:start}
+.grid2e{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start}
 .panel{background:#fff;border:1px solid var(--bd);border-radius:5px;overflow:hidden}
 .ph{background:var(--head);border-bottom:1px solid var(--bd);
  padding:7px 10px;font-size:12.5px;font-weight:600;color:#3d4654;
@@ -123,6 +124,22 @@ td.wxid{color:#8a929e;font-size:11.5px;word-break:break-all;max-width:280px}
     </div>
   </div>
 
+  <div class="grid2e" style="margin-top:10px">
+    <div class="panel">
+      <div class="ph">生肖金额表 · 澳门 <span>平特 + 连肖 合并一列</span></div>
+      <div id="zxbMO"></div>
+    </div>
+    <div class="panel">
+      <div class="ph">生肖金额表 · 香港 <span>平特 + 连肖 合并一列</span></div>
+      <div id="zxbHK"></div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:10px">
+    <div class="ph">组合注（二中二 / 三中三） <span>整注，不摊到单肖</span></div>
+    <div id="zxbCombo"></div>
+  </div>
+
   <div class="panel" style="margin-top:10px">
     <div class="ph">最近记账 <span>最新在上</span></div>
     <div id="recent"></div>
@@ -199,6 +216,50 @@ function switchAcc(v){
   loadContacts();
 }
 
+// ---------- 生肖金额表 / 组合注（只读展示） ----------
+// 数据由 /api/dashboard 的 zodiac_board 给：港澳各一份，平特与连肖已合并成一列。
+function renderZxBoard(id, b){
+  const el = document.getElementById(id);
+  if (!b || !b.rows || !b.rows.length){
+    el.innerHTML = '<div class="empty">暂无数据</div>';
+    return;
+  }
+  const has = b.rows.some(r => Number(r.amount) > 0);
+  el.innerHTML = `<table>
+    <tr><th style="width:64px">生肖</th><th>号码</th><th class="tr" style="width:160px">金额</th></tr>
+    ${b.rows.map(r => {
+      const amt = Number(r.amount || 0);
+      return `<tr>
+        <td><b>${esc(r.zodiac)}</b></td>
+        <td class="txt">${esc(r.nums)}</td>
+        <td class="num2 tr ${amt > 0 ? 'hot' : ''}">${fmt(amt)}
+          ${amt > 0 ? `<div class="mini">平特 ${fmt(r.pingte)} · 连肖 ${fmt(r.lianxiao)}</div>` : ''}</td>
+      </tr>`;
+    }).join('')}
+    <tr><td><b>合计</b></td><td class="txt"></td>
+      <td class="num2 tr"><b>${fmt(b.totals && b.totals.board)}</b></td></tr>
+  </table>${has ? '' : '<div class="empty" style="padding:8px 0 10px">本期还没有平特 / 连肖的注</div>'}`;
+}
+
+function renderCombo(list){
+  const el = document.getElementById('zxbCombo');
+  if (!list || !list.length){
+    el.innerHTML = '<div class="empty">本期还没有二中二 / 三中三的注</div>';
+    return;
+  }
+  el.innerHTML = `<table>
+    <tr><th style="width:150px">时间</th><th style="width:56px">市场</th>
+        <th class="tr" style="width:82px">金额</th><th style="width:190px">原文</th><th>命中条件</th></tr>
+    ${list.map(x => `<tr>
+      <td class="num2">${esc(x.ts)}</td>
+      <td>${esc(x.mk)}</td>
+      <td class="num2 tr hot">${fmt(x.amount)}</td>
+      <td class="txt">${esc(x.text)}</td>
+      <td class="txt">${esc(x.need)}</td>
+    </tr>`).join('')}
+  </table>`;
+}
+
 async function load(){
   try{
     const r = await fetch('/api/dashboard' + (ACC ? '?account=' + encodeURIComponent(ACC) : ''));
@@ -244,6 +305,18 @@ async function load(){
         </tr>`).join('')}
       </table>`;
     }
+
+    const zb = d.zodiac_board || {};
+    renderZxBoard('zxbMO', zb.MO);
+    renderZxBoard('zxbHK', zb.HK);
+    let combo = [];
+    ['MO', 'HK'].forEach(function (m) {
+      ((zb[m] || {}).combo || []).forEach(function (x) {
+        combo.push(Object.assign({}, x, {mk: m === 'MO' ? '澳门' : '香港'}));
+      });
+    });
+    combo.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
+    renderCombo(combo);
 
     if (!d.recent.length){
       document.getElementById('recent').innerHTML = '<div class="empty">还没有记账</div>';
