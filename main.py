@@ -840,8 +840,30 @@ number=直接号码
 红双蓝单各号5#→{{"type":"color_parity","names":["红双","蓝单"],"amount":5}}
 1*13*34*7各10A→{{"type":"number","numbers":["01","13","34","07"],"amount":10}}
 
+【整笔玩法：平特 / 连肖 / N中M】
+这三种是「整笔」：金额不摊到号码上，也绝对不能拆成号码。type 只能是
+pingte（平特/平码/平肖）、lianxiao（连肖）、zhong（N中M，如二中二/三中二/四中四）。
+- 平特：写几个肖就是这几个肖「一共」多少钱；只有写「各」才是每肖各。
+  只要出现「各」，就必须 each:true（漏了会少记一半钱）。
+  "平特鼠100" → zodiacs ["鼠"]，each false，amount 100
+  "平特鼠牛各100" → zodiacs ["鼠","牛"]，each true，amount 100（每肖 100，整笔 200）
+- 连肖：从写的生肖起，按 鼠牛虎兔龙蛇马羊猴鸡狗猪 往后连 N 个；写不够 N 个自动补，到尾回绕。
+  位数一到十二都认（"鼠十连肖"=十连、"鼠十二连肖"=十二连）；**不写位数一律按二连**。
+  zodiacs 必须写补位后的完整生肖（"连肖鼠50" → ["鼠","牛"]，不是 ["鼠"]）。
+  带「各」时同样 each:true（"鼠牛三连肖各100" → 三肖各 100，整笔 300）。
+  "鼠二连肖100" → zodiacs ["鼠","牛"]，amount 100
+  "鼠牛三连肖各100" → zodiacs ["鼠","牛","虎"]，each true，amount 100
+  "鸡四连肖200" → zodiacs ["鸡","狗","猪","鼠"]，amount 200
+  "连肖鼠50" → zodiacs ["鼠","牛"]，amount 50
+- N中M：写成 "四中四 / 三中二 / 六中六"，中字前面的数 = 必须写满几个肖，整注一笔。
+  "鼠牛虎兔四中四50" → zodiacs 四个，amount 50
+  "鼠牛虎蛇四中二100" → zodiacs 四个，amount 100（四肖里中两个）
+  组合注不写「各」；写了「各」、或者肖数和前面那个数字对不上，一律 items:[]（不许猜）。
+
 【输出格式】
 {{"items":[...]}}
+整笔玩法的 item 写法：{{"type":"pingte","zodiacs":["鼠","牛"],"each":true,"amount":100}}
+each=true 时 amount 填**每肖的单价**，由程序乘肖数；each=false 或省略时 amount 就是整笔金额。
 无法解析返回：{{"items":[]}}"""
 
 
@@ -859,8 +881,57 @@ def _extract_items(result: str) -> List[dict]:
     return []
 
 
-def parse_bet_text(text: str, zodiac_mapping: Dict[str, List[str]]) -> Dict[str, float]:
-    """调用 OpenAI 兼容模型解析下注文本，返回 {号码: 金额}；失败返回空 dict。"""
+# 模型给的整笔玩法 type → 我们的 kind
+_FLAT_TYPE = {
+    "pingte": "pingte", "ping": "pingte", "平特": "pingte", "平码": "pingte", "平肖": "pingte",
+    "lianxiao": "lianxiao", "lian": "lianxiao", "连肖": "lianxiao",
+    "zhong": "zhong", "zhongm": "zhong", "组合": "zhong", "组合注": "zhong",
+}
+_FLAT_LABEL = {"pingte": "平特", "lianxiao": "连肖", "zhong": "组合注"}
+
+
+def _items_to_extras(items: List[dict], zodiac_mapping: Dict[str, List[str]]) -> List[dict]:
+    """把模型输出里的整笔玩法（平特/连肖/N中M）抽成 extras。
+
+    模型给的金额一律不信：带「各」时由程序算 单价×肖数；生肖不合法、金额 ≤0
+    的整笔项直接丢掉（宁可这条记不上，也不能记一笔说不清的账）。
+    """
+    out: List[dict] = []
+    for it in items:
+        kind = _FLAT_TYPE.get(str(it.get("type") or "").strip().lower())
+        if not kind:
+            continue
+        raw = it.get("zodiacs") or it.get("names") or []
+        if isinstance(raw, str):
+            raw = list(raw)
+        zs = [c for c in raw if c in zodiac_mapping]
+        zs = [c for i, c in enumerate(zs) if c not in zs[:i]]
+        try:
+            amt = float(it.get("amount") or 0)
+        except Exception:
+            amt = 0.0
+        if not zs or amt <= 0:
+            logger.warning(f"模型整笔项不合规，丢弃：{it}")
+            continue
+        each = bool(it.get("each"))
+        if each:
+            amt = round(amt * len(zs), 2)
+        out.append({
+            "play": _FLAT_LABEL.get(kind, kind),
+            "text": str(it.get("text") or "") or ("%s%s%s"
+                                                  % (_FLAT_LABEL.get(kind, kind),
+                                                     "".join(zs), amt)),
+            "amount": round(amt, 2),
+            "nums": "",
+            "kind": kind,
+            "zodiacs": "".join(zs),
+            "each": each,
+        })
+    return out
+
+
+def parse_bet_text_full(text: str, zodiac_mapping: Dict[str, List[str]]) -> tuple:
+    """调模型解析，返回 ({号码: 金额}, [整笔注...])。失败返回 ({}, [])。"""
     kwargs = dict(
         model=LLM_MODEL,
         messages=[
@@ -883,15 +954,22 @@ def parse_bet_text(text: str, zodiac_mapping: Dict[str, List[str]]) -> Dict[str,
             logger.info(f"AI返回：{result}")
             items = _extract_items(result)
             bets = expand_bets(items, zodiac_mapping)
-            logger.info(f"展开结果：{len(bets)} 个号码，共 ${sum(bets.values()):.2f}")
-            return bets
+            extras = _items_to_extras(items, zodiac_mapping)
+            logger.info(f"展开结果：{len(bets)} 个号码，共 ${sum(bets.values()):.2f}"
+                        + ("，整笔 %d 笔" % len(extras) if extras else ""))
+            return bets, extras
         except Exception as e:
             last_err = e
             logger.warning(f"第{attempt}次解析失败：{e}")
             time.sleep(1 if attempt == 1 else 0)
 
     logger.error(f"API调用失败：{last_err}")
-    return {}
+    return {}, []
+
+
+def parse_bet_text(text: str, zodiac_mapping: Dict[str, List[str]]) -> Dict[str, float]:
+    """调用 OpenAI 兼容模型解析下注文本，返回 {号码: 金额}；失败返回空 dict。"""
+    return parse_bet_text_full(text, zodiac_mapping)[0]
 
 
 # ======================== 消息去重（持久化）========================
@@ -1402,18 +1480,34 @@ def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
         market = "MO"
     detail = ""
     extras: List[dict] = []
+    parcels: List[dict] = []
     if local["ok"]:
         bets = local["bets"]
         extras = list(local.get("extras") or [])
+        parcels = list(local.get("parcels") or [])
+        # 一条消息里港、澳都写了：顶层 bets 是空的（跨盘同号不能合并），
+        # 这里先汇总一份只用于判断"有没有认出东西"和强制单盘的情况，
+        # 真正的落账走下面的 segs。
+        if len(parcels) > 1:
+            merged: Dict[str, float] = {}
+            for p in parcels:
+                for n, a in (p.get("bets") or {}).items():
+                    merged[n] = round(merged.get(n, 0.0) + a, 2)
+            bets = merged
+            extras = [e for p in parcels for e in (p.get("extras") or [])]
         detail = local["detail"]
         source = "规则"
     elif local.get("fatal") or "暂不支持" in (local.get("reason") or ""):
-        # 这类模型也认不准（12/13/14 还没实现、鼠5尾 有歧义、纯寒暄），
+        # 这类模型也认不准（鼠5尾 有歧义、纯寒暄、组合注写法不对），
         # 判死比让它猜一个更可靠，也省一次调用。
         bets = {}
         source = "不支持"
     else:
-        bets = parse_bet_text(text, zodiac_mapping)
+        # 规则吃不下的才问模型。模型现在也认 12/13/14（prompt 里有整笔玩法口径），
+        # 整笔注走 extras，金额由程序校验，不采信模型自己算的合计。
+        bets, model_extras = parse_bet_text_full(text, zodiac_mapping)
+        if model_extras:
+            extras = model_extras
         source = "模型"
 
     if not bets and not extras:
@@ -1429,84 +1523,126 @@ def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
         return {"ok": False, "reason": why}
 
     rec_id = "%s#%d" % (msg_id, int(time.time() * 1000))
-    moved: dict = {}
-    with DATA_LOCK:
-        # 换期就在这里发生：账本如果还是上一期的，先归档再清零。
-        issue = ensure_issue(acc, issue_of(create_time), info=moved)
-        data = load_data(acc, market)
-        applied = {}
-        for number, amount in sorted(bets.items()):
-            if number in data:
-                data[number] += amount
-                applied[number] = amount
-        save_data(data, acc, market)
-        grand_total = sum(data.values())
-        # 平特整肖、二中二/三中三只记总额，不进 49 号盘（号盘是"每号多少钱"）。
-        # 这笔钱单独存，合计要带上，不然总金额会比客户报的少一截。
-        extra_total = 0.0
-        if extras:
-            od = load_others(acc, market)
-            od["issue"] = issue
-            for e in extras:
-                amt = round(float(e.get("amount") or 0), 2)
-                od["items"].append({
-                    "rec_id": rec_id,
-                    "play": e.get("play") or "",
-                    "text": e.get("text") or "",
-                    "amount": amt,
-                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    # 这三个字段让总览/网页看板不必再猜原文：哪类注、哪几个肖、是否各付
-                    "kind": e.get("kind") or "",
-                    "zodiacs": e.get("zodiacs") or "",
-                    "each": bool(e.get("each")),
-                })
-                extra_total = round(extra_total + amt, 2)
-            od["total"] = round(float(od.get("total") or 0) + extra_total, 2)
-            save_others(od, acc, market)
-        # 总金额 = 澳门盘 + 香港盘 + 两边不计号
-        grand_total = market_totals(acc)["ALL"]["total"]
-        top = top_numbers(data, 10)
 
-    total_amount = round(sum(applied.values()) + extra_total, 2)
-    rec = {
-        # 撤销后客户可能重发一遍，同一条 msg_id 于是会有多笔记账记录。
-        # rec_id 才是这一笔的唯一身份，撤销认它，不认 msg_id。
-        "rec_id": rec_id,
-        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "msg_id": msg_id, "chat": chat_name, "sender": sender,
-        "sender_name": sender_name, "account": acc,
-        "text": text,
-        "market": market,
-        "numbers": len(applied),
-        "total": round(total_amount, 2),
-        # 这一笔实际给哪几个号各加了多少。撤销照着它逐号减回去，
-        # 不能只减 total —— 一笔命中 4 个号时，400 不知道该落到哪儿。
-        "applied": {n: round(a, 2) for n, a in applied.items()},
-        # 不进号盘的那部分（平特整肖、二中二…），撤销按 rec_id 从这儿扣
-        "extras": extras, "extra_total": round(extra_total, 2),
-        # 撤销要把消息号和指纹放开，得先把它们存下来
-        "fp": fp, "chat_id": chat_id, "create_time": create_time,
-        "issue": issue,
-        "grand_total": round(grand_total, 2),
-        "top": [{"num": n, "amount": round(a, 2)} for n, a in top],
-        # 这单是规则算的还是模型算的，出账争议时得能查
-        "source": source,
-        "detail": detail,
-    }
-    if moved.get("archived_issue"):
-        rec["archived_issue"] = moved.get("archived_issue")
-        rec["archived_total"] = moved.get("archived_total")
-    _append_record(rec, account=acc)
-    logger.info(f"记账成功（{source}）：[{acc}] {chat_name} ${total_amount:.2f}，"
-                f"{len(applied)}个号码" + (f"+{extra_total:.2f}(不计号)" if extras else "")
-                + f"，累计 ${grand_total:.2f}")
-    if not detail:
-        detail = "%d个号 共计%s" % (len(applied), _fmt_money(total_amount))
-    return {"ok": True, "numbers": len(applied), "total": round(total_amount, 2),
-            "flat_total": round(extra_total, 2), "extras": extras,
-            "market": market,
+    # 一条消息里港、澳都写了（客户说正常不会这么报，但要求支持）：按段各落一笔账。
+    # 撤销时也是各段各撤各的，不会把香港的钱扣到澳门去。
+    parcels = list(local.get("parcels") or [])
+    if local["ok"] and len(parcels) > 1 and forced not in ("HK", "MO"):
+        segs: List[dict] = [{
+            "market": p.get("market") if p.get("market") in ("HK", "MO") else "MO",
+            "bets": p.get("bets") or {},
+            "extras": p.get("extras") or [],
+            "detail": p.get("detail") or "",
+            "rec_id": "%s-%d" % (rec_id, idx + 1),
+        } for idx, p in enumerate(parcels)]
+    else:
+        segs = [{"market": market, "bets": bets, "extras": extras,
+                 "detail": detail, "rec_id": rec_id}]
+
+    moved: dict = {}
+    written: List[dict] = []
+    for seg in segs:
+        seg_market = seg["market"]
+        with DATA_LOCK:
+            # 换期就在这里发生：账本如果还是上一期的，先归档再清零。
+            issue = ensure_issue(acc, issue_of(create_time), info=moved)
+            data = load_data(acc, seg_market)
+            applied = {}
+            for number, amount in sorted((seg["bets"] or {}).items()):
+                if number in data:
+                    data[number] += amount
+                    applied[number] = amount
+            save_data(data, acc, seg_market)
+            # 平特整肖、连肖、N中M 只记总额，不进 49 号盘（号盘是"每号多少钱"）。
+            # 这笔钱单独存，合计要带上，不然总金额会比客户报的少一截。
+            extra_total = 0.0
+            if seg["extras"]:
+                od = load_others(acc, seg_market)
+                od["issue"] = issue
+                for e in seg["extras"]:
+                    amt = round(float(e.get("amount") or 0), 2)
+                    od["items"].append({
+                        "rec_id": seg["rec_id"],
+                        "play": e.get("play") or "",
+                        "text": e.get("text") or "",
+                        "amount": amt,
+                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        # 这三个字段让总览/网页看板不必再猜原文：哪类注、哪几个肖、是否各付
+                        "kind": e.get("kind") or "",
+                        "zodiacs": e.get("zodiacs") or "",
+                        "each": bool(e.get("each")),
+                    })
+                    extra_total = round(extra_total + amt, 2)
+                od["total"] = round(float(od.get("total") or 0) + extra_total, 2)
+                save_others(od, acc, seg_market)
+            # 总金额 = 澳门盘 + 香港盘 + 两边不计号
+            grand_total = market_totals(acc)["ALL"]["total"]
+            top = top_numbers(data, 10)
+
+        total_amount = round(sum(applied.values()) + extra_total, 2)
+        rec = {
+            # 撤销后客户可能重发一遍，同一条 msg_id 于是会有多笔记账记录。
+            # rec_id 才是这一笔的唯一身份，撤销认它，不认 msg_id。
+            "rec_id": seg["rec_id"],
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "msg_id": msg_id, "chat": chat_name, "sender": sender,
+            "sender_name": sender_name, "account": acc,
+            "text": text,
+            "market": seg_market,
+            "numbers": len(applied),
+            "total": round(total_amount, 2),
+            # 这一笔实际给哪几个号各加了多少。撤销照着它逐号减回去，
+            # 不能只减 total —— 一笔命中 4 个号时，400 不知道该落到哪儿。
+            "applied": {n: round(a, 2) for n, a in applied.items()},
+            # 不进号盘的那部分（平特整肖、连肖、N中M），撤销按 rec_id 从这儿扣
+            "extras": seg["extras"], "extra_total": round(extra_total, 2),
+            # 撤销要把消息号和指纹放开，得先把它们存下来
+            "fp": fp, "chat_id": chat_id, "create_time": create_time,
+            "issue": issue,
+            "grand_total": round(grand_total, 2),
+            "top": [{"num": n, "amount": round(a, 2)} for n, a in top],
+            # 这单是规则算的还是模型算的，出账争议时得能查
+            "source": source,
+            "detail": seg["detail"],
+        }
+        if moved.get("archived_issue"):
+            rec["archived_issue"] = moved.get("archived_issue")
+            rec["archived_total"] = moved.get("archived_total")
+        _append_record(rec, account=acc)
+        logger.info(f"记账成功（{source}）：[{acc}] {chat_name} ${total_amount:.2f}，"
+                    f"{len(applied)}个号码" + (f"+{extra_total:.2f}(不计号)" if seg["extras"] else "")
+                    + f"，{seg_market}，累计 ${grand_total:.2f}")
+        written.append({"market": seg_market, "numbers": len(applied),
+                        "total": total_amount, "flat_total": extra_total,
+                        "extras": seg["extras"], "detail": seg["detail"],
+                        "rec_id": seg["rec_id"]})
+
+    if len(written) == 1:
+        w = written[0]
+        if not detail:
+            detail = w["detail"] or "%d个号 共计%s" % (w["numbers"], _fmt_money(w["total"]))
+        return {"ok": True, "numbers": w["numbers"], "total": round(w["total"], 2),
+                "flat_total": round(w["flat_total"], 2), "extras": w["extras"],
+                "market": w["market"],
+                "grand_total": round(grand_total, 2), "account": acc,
+                "source": source, "detail": detail,
+                "archived_issue": moved.get("archived_issue"),
+                "archived_total": moved.get("archived_total")}
+
+    # 分段落了两笔以上：返回合计，同时把每段明细给出去
+    return {"ok": True,
+            "numbers": sum(w["numbers"] for w in written),
+            "total": round(sum(w["total"] for w in written), 2),
+            "flat_total": round(sum(w["flat_total"] for w in written), 2),
+            "extras": [e for w in written for e in (w["extras"] or [])],
+            "market": written[0]["market"],
+            "segments": [{"market": w["market"], "numbers": w["numbers"],
+                          "total": round(w["total"], 2), "rec_id": w["rec_id"]}
+                         for w in written],
             "grand_total": round(grand_total, 2), "account": acc,
-            "source": source, "detail": detail,
+            "source": source,
+            "detail": "；".join("%s %s" % ("香港" if w["market"] == "HK" else "澳门", w["detail"])
+                               for w in written if w["detail"]) or detail,
             "archived_issue": moved.get("archived_issue"),
             "archived_total": moved.get("archived_total")}
 
@@ -2696,7 +2832,9 @@ def api_parse():
         "ok": False,
         "source": "规则",
         "reason": local.get("reason") or "解析失败",
-        # can_llm=False：这类连模型也别试（12/13/14、鼠5尾 歧义、纯寒暄）
+        # can_llm=False：连模型也不该试（中特/特肖 属真不支持、鼠5尾 歧义、
+        # 平特写号码、组合注带「各」/肖数不符、纯寒暄）—— 这些客户已明确"不解析"。
+        # 其余规则吃不下的 12/13/14 写法会正常走模型（prompt 里有整笔玩法口径）。
         "can_llm": not local.get("fatal"),
     })
 

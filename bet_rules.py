@@ -133,6 +133,9 @@ SX_ORDER = "鼠牛虎兔龙蛇马羊猴鸡狗猪"
 # 不枚举具体词，只要「一二两三四五六(或 1-6) 中 一二两三四五六(或 1-6)」就认。
 _ZHONG_WORDS = r"(?:[一二两三四五六1-6]\s*中\s*[一二两三四五六1-6])"
 
+# 连肖位数：一到十二（"十/十一/十二" 和阿拉伯 1-12 都认，12 生肖最长十二连）
+_CN_LEN = r"(?:十[一二]?|1[0-2]|[1-9]|[一二两三四五六七八九])"
+
 # 12/13/14 的玩法词：这些整笔玩法后面跟的数字就是钱，不可能是号码，
 # 所以「平特鼠牛各100 鼠牛二中二100」能干净地拆成两注（不然会被并成一注）
 _FLAT_WORD = re.compile(r"(平特|平码|平肖|连肖|%s)" % _ZHONG_WORDS)
@@ -167,6 +170,41 @@ def detect_market(t: str) -> str:
         if k in t:
             return "HK"
     return "MO"
+
+
+# 港澳标记词（长的排前面，正则按左到右优先，避免 "香港" 被拆成 "香"+"港"）
+_MARK_WORDS = ("新奥", "香港", "澳门", "奥门", "港", "澳", "香", "奥", "巷", "门")
+_MARK_RE = re.compile("|".join(re.escape(w) for w in _MARK_WORDS))
+_HK_WORDS = {"香港", "港", "香", "巷"}
+
+
+def _strip_marks(t: str) -> str:
+    """标记词只是分盘用的，不是下注内容 —— 留着会被当成认不出的碎片。"""
+    for w in _MARK_WORDS:
+        t = t.replace(w, "")
+    return t
+
+
+def split_markets(t: str) -> List[tuple]:
+    """按港澳标记词把整条消息切成 [(market, 段文本)]，标记词本身剥掉。
+
+    客户拍板（2026-11-15）：一条消息里分别写了「港」和「澳」的，要按词分盘，
+    不能把两笔都塞进第一个盘。没写盘的第一段默认澳门（跟原来一致）。
+    """
+    out: List[tuple] = []
+    pos = 0
+    cur = None                     # None = 这一段之前还没写过盘，落账时按澳门算
+    for m in _MARK_RE.finditer(t):
+        body = t[pos:m.start()].strip(" ,，、。;；:：")
+        if body:
+            out.append((cur, body))
+        cur = "HK" if m.group(0) in _HK_WORDS else "MO"
+        pos = m.end()
+    tail = t[pos:].strip(" ,，、。;；:：")
+    if tail:
+        out.append((cur, tail))
+    return out
+
 
 
 # ======================== 中文数字 ========================
@@ -407,11 +445,12 @@ def _zodiac_plays(zodiac: Dict[str, List[str]]) -> List[Play]:
         Play("pingte", "平特", r"(?:平特|平码|平肖|平)((?:%s)+)" % sxs,
              _r_pingte, 95, mode="flat"),
         # 连肖两种语序都认：鼠二连肖 / 二连肖鼠；位数可写可不写
+        # 位数支持到十二连（十二生肖最长），"十/十一/十二" 也算
         Play("lianxiao", "连肖",
-             r"((?:%s)+)\s*[一二两三四五六1-6]?\s*连肖" % sxs,
+             r"((?:%s)+)\s*%s?\s*连肖" % (sxs, _CN_LEN),
              _r_lianxiao, 93, mode="flat"),
         Play("lianxiao", "连肖",
-             r"[一二两三四五六1-6]?\s*连肖\s*((?:%s)+)" % sxs,
+             r"%s?\s*连肖\s*((?:%s)+)" % (_CN_LEN, sxs),
              _r_lianxiao2, 93, mode="flat"),
         # 中二/中三/中四/中五/中六：生肖在前或在后都认，整注一笔
         Play("zhong", "中二/中三", r"((?:%s)+)\s*%s" % (sxs, _ZHONG_WORDS),
@@ -767,12 +806,40 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
                 "reason": "写法有歧义（鼠5尾 请写成 鼠 5 5尾各10）",
                 "bets": {}, "items": [], "detail": "", "market": detect_market(t)}
 
-    market = detect_market(t)
-    # 港澳标记词只是分盘用的，不是下注内容 —— 不抹掉会被当成认不出的碎片，
-    # 整条消息就白丢给模型了。
-    for w in ("新奥", "香港", "澳门", "奥门", "港", "澳", "香", "奥", "巷", "门"):
-        t = t.replace(w, "")
+    # 分盘：客户拍板（2026-11-15）一条消息里同时写了港和澳的要按词分盘。
+    # 绝大多数消息只有一段，走下面这个快路径，行为跟以前一模一样。
+    segs = split_markets(t)
+    marks = {mk for mk, _ in segs if mk}
+    # 只有「港」和「澳」都写了才算分盘；单盘消息一律走原路径，免得「门/香」这类
+    # 单字标记把一条消息误切成两段。
+    if len(segs) <= 1 or len(marks) < 2:
+        mk = detect_market(t)
+        r = parse_core(_strip_marks(t), zodiac, mk)
+        cop = dict(r)
+        r["parcels"] = [cop]
+        r["multi"] = False
+        return r
 
+    parcels = [parse_core(body, zodiac, mk or "MO") for mk, body in segs]
+    bad = next((p for p in parcels if not p["ok"]), {})
+    return {
+        "ok": all(p["ok"] for p in parcels),
+        "fatal": bool(bad.get("fatal")),
+        # 跨盘不合并同号（鼠在澳门和香港是两笔账，合并就串了）；落账走 parcels
+        "bets": {},
+        "items": [it for p in parcels for it in (p.get("items") or [])],
+        "extras": [e for p in parcels for e in (p.get("extras") or [])],
+        "flat_total": round(sum(p.get("flat_total") or 0 for p in parcels), 2),
+        "detail": "；".join(p.get("detail") or "" for p in parcels if p.get("detail")),
+        "market": parcels[0]["market"],
+        "reason": bad.get("reason") or "",
+        "parcels": parcels,
+        "multi": True,
+    }
+
+
+def parse_core(t: str, zodiac: Dict[str, List[str]], market: str) -> dict:
+    """单盘解析（港澳标记词已经剥掉）。parse_local 分出多段时对每段各调一次。"""
     sx_chars = "".join(zodiac.keys())
 
     items_out: List[dict] = []
@@ -781,6 +848,16 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
     parts: List[str] = []
 
     for seg in split_items(t, sx_chars):
+        # 平特/连肖里又写号码（"平特鼠 07 100"）：07 是号还是钱说不清，判死别猜。
+        # 只对"带生肖"的整笔注生效 —— "二中二 5 17 各20" 是号码盘组合注，别误伤。
+        # 先把玩法本身的数字去掉（"六中六"、"3连肖"）再数剩下的数字个数。
+        if _FLAT_WORD.search(seg) and re.search(r"[%s]" % sx_chars, seg):
+            _body = re.sub(_ZHONG_WORDS, "", seg)
+            _body = re.sub(r"%s\s*连肖" % _CN_LEN, "连肖", _body)
+            if len(re.findall(r"\d+(?:\.\d+)?", _body)) >= 2:
+                return {"ok": False, "fatal": True,
+                        "reason": "平特/连肖里不要写号码（%s）" % seg,
+                        "bets": {}, "items": [], "detail": "", "market": market}
         got = parse_item(seg, zodiac, sx_chars)
         if got is None:
             return {"ok": False, "reason": "规则解析不了：%s" % seg,
@@ -802,7 +879,7 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
             if re.search(r"连肖", txt):
                 kind = "lianxiao"
                 n = 2                       # 只写「连肖」不写位数，按二连
-                m_len = re.search(r"([一二两三四五六1-6])\s*连肖", txt)
+                m_len = re.search(r"(%s)\s*连肖" % _CN_LEN, txt)
                 if m_len:
                     n = int(cn2num(m_len.group(1)) or 0) or 2
                 if zs and len(zs) < n:
@@ -810,6 +887,20 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
                     zs = [SX_ORDER[(i + k) % 12] for k in range(n)]
             elif re.search(_ZHONG_WORDS, txt):
                 kind = "zhong"
+                # 组合注的写法里没有「各」（"鼠牛二中二各100" 不是正常报法），
+                # 而且「四中二」必须写满 4 个肖。两种都算异常写法，判死让客户重报，
+                # 别自己猜 —— 整笔玩法错账没法从号盘反查。
+                if each and zs:
+                    return {"ok": False, "fatal": True,
+                            "reason": "组合注不写「各」（%s），请直接写整注金额" % txt,
+                            "bets": {}, "items": [], "detail": "", "market": market}
+                m_nm = re.search(r"([一二两三四五六1-6])\s*中\s*[一二两三四五六1-6]", txt)
+                n_first = int(cn2num(m_nm.group(1)) or 0) if m_nm else 0
+                if n_first and zs and len(zs) != n_first:
+                    return {"ok": False, "fatal": True,
+                            "reason": "组合注写的肖数对不上（%s 要 %d 个肖，只写了 %d 个）"
+                                      % (txt, n_first, len(zs)),
+                            "bets": {}, "items": [], "detail": "", "market": market}
             else:
                 kind = "pingte"
             # 带「各」＝每肖各这么多（两肖各 10 = 20）；不带就按原文整笔

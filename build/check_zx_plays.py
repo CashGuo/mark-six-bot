@@ -73,29 +73,44 @@ CASES = [
     # ---- N中M：不枚举具体词，四中四 / 五中三 / 六中六 都认 ----
     ("鼠牛二中二100", "MO", 0, [("zhong", "鼠牛", 100)]),
     ("二中二鼠牛100", "MO", 0, [("zhong", "鼠牛", 100)]),
-    ("鼠牛三中二100", "MO", 0, [("zhong", "鼠牛", 100)]),
-    ("鼠牛二中二各100", "MO", 0, [("zhong", "鼠牛", 200)]),
+    # 客户判决：肖数比 N 少（只写 2 肖却写三中二）不解析
+    ("鼠牛三中二100", None, None, "fail"),
+    # 客户判决：组合注一般不带「各」，出现就判死（不猜金额）
+    ("鼠牛二中二各100", None, None, "fail"),
     ("鼠牛虎三中三200", "MO", 0, [("zhong", "鼠牛虎", 200)]),
     ("三中三鼠牛虎200", "MO", 0, [("zhong", "鼠牛虎", 200)]),
     ("澳门 三中三 鼠牛虎 200", "MO", 0, [("zhong", "鼠牛虎", 200)]),
-    ("港 鼠牛虎三中三各50", "HK", 0, [("zhong", "鼠牛虎", 150)]),
+    ("港 鼠牛虎三中三各50", None, None, "fail"),
     ("鼠牛虎蛇四中二100", "MO", 0, [("zhong", "鼠牛虎蛇", 100)]),
     ("鼠牛虎蛇猴五中三200", "MO", 0, [("zhong", "鼠牛虎蛇猴", 200)]),
-    ("鼠牛虎兔四中四各50", "MO", 0, [("zhong", "鼠牛虎兔", 200)]),
+    ("鼠牛虎兔四中四各50", None, None, "fail"),
     ("四中四鼠牛虎兔50", "MO", 0, [("zhong", "鼠牛虎兔", 50)]),
-    ("港 鼠牛虎兔四中四各50", "HK", 0, [("zhong", "鼠牛虎兔", 200)]),
+    ("港 鼠牛虎兔四中四各50", None, None, "fail"),
     ("鼠牛虎兔龙五中五200", "MO", 0, [("zhong", "鼠牛虎兔龙", 200)]),
     ("鼠牛虎兔龙蛇六中六100", "MO", 0, [("zhong", "鼠牛虎兔龙蛇", 100)]),
-    ("鼠牛虎兔龙蛇六中六各10", "MO", 0, [("zhong", "鼠牛虎兔龙蛇", 60)]),
+    ("鼠牛虎兔龙蛇六中六各10", None, None, "fail"),
     # ---- 与号码盘并存 ----
     ("平特鼠牛各100 鼠牛二中二100", "MO", 0,
      [("pingte", "鼠牛", 200), ("zhong", "鼠牛", 100)]),
     ("平特鼠100 鼠牛二中二100 鼠牛虎三中三200", "MO", 0,
      [("pingte", "鼠", 100), ("zhong", "鼠牛", 100), ("zhong", "鼠牛虎", 200)]),
-    ("平特鼠牛各100，鼠牛二中二各100", "MO", 0,
-     [("pingte", "鼠牛", 200), ("zhong", "鼠牛", 200)]),
+    # 组合注带「各」判死 → 整条判死
+    ("平特鼠牛各100，鼠牛二中二各100", None, None, "fail"),
     ("蛇50 平特蛇100", "MO", 4, [("pingte", "蛇", 100)]),
     ("平特鼠100 鼠50", "MO", 4, [("pingte", "鼠", 100)]),
+    # ---- 连肖：十连 / 十一连 / 十二连（客户判决：要支持） ----
+    ("鼠十连肖100", "MO", 0, [("lianxiao", "鼠牛虎兔龙蛇马羊猴鸡", 100)]),
+    ("10连肖鼠100", "MO", 0, [("lianxiao", "鼠牛虎兔龙蛇马羊猴鸡", 100)]),
+    ("鼠十一连肖100", "MO", 0, [("lianxiao", "鼠牛虎兔龙蛇马羊猴鸡狗", 100)]),
+    ("鼠十二连肖100", "MO", 0, [("lianxiao", "鼠牛虎兔龙蛇马羊猴鸡狗猪", 100)]),
+    ("马十二连肖各10", "MO", 0, [("lianxiao", "马羊猴鸡狗猪鼠牛虎兔龙蛇", 120)]),
+    # ---- 平特里写号码：客户判决「不解析，这是错的」 ----
+    ("平特鼠 07 100", None, None, "fail"),
+    # ---- 港澳分盘：一条消息里港、澳都写，按词各落一笔账 ----
+    ("港 平特鼠100 澳 平特牛100", "HK", None, "multi",
+     [("HK", 0, [("pingte", "鼠", 100)]), ("MO", 0, [("pingte", "牛", 100)])]),
+    ("港 牛100 澳 鼠50", "HK", None, "multi",
+     [("HK", 4, []), ("MO", 4, [])]),
     # ---- 应判死 ----
     ("鼠牛中二100", None, None, "fail"),
     ("平特鼠5尾100", None, None, "fail"),
@@ -112,7 +127,9 @@ def main():
     print("当年生肖：%s　共 %d 条\n" % (cur, len(CASES)))
 
     bad = []
-    for text, market, n_numbers, expect in CASES:
+    for case in CASES:
+        text, market, n_numbers, expect = case[:4]
+        parcel_exp = case[4] if len(case) > 4 else None
         r = bet_rules.parse_local(text, zodiac)
         if expect == "fail":
             ok = not r.get("ok")
@@ -122,6 +139,9 @@ def main():
                 bad.append(text)
             continue
 
+        # 分盘用例：顶层 extras 是各段汇总的，这里先把期望摊平
+        if parcel_exp:
+            expect = [it for (_pm, _pn, plist) in parcel_exp for it in plist]
         got_list = [(e["kind"], e["zodiacs"], e["amount"]) for e in (r.get("extras") or [])]
         problems = []
         if not r.get("ok"):
@@ -129,8 +149,29 @@ def main():
         else:
             if r.get("market") != market:
                 problems.append("盘 %s≠%s" % (r.get("market"), market))
-            if len(r.get("bets") or {}) != n_numbers:
+            if n_numbers is not None and len(r.get("bets") or {}) != n_numbers:
                 problems.append("号码盘 %d≠%d" % (len(r.get("bets") or {}), n_numbers))
+            if parcel_exp:
+                ps = r.get("parcels") or []
+                if len(ps) != len(parcel_exp):
+                    problems.append("段数 %d≠%d" % (len(ps), len(parcel_exp)))
+                else:
+                    for i, (pm, pn, plist) in enumerate(parcel_exp):
+                        p = ps[i]
+                        if p.get("market") != pm:
+                            problems.append("第%d段盘 %s≠%s" % (i + 1, p.get("market"), pm))
+                        if pn is not None and len(p.get("bets") or {}) != pn:
+                            problems.append("第%d段号码盘 %d≠%d"
+                                            % (i + 1, len(p.get("bets") or {}), pn))
+                        g = [(e["kind"], "".join(e["zodiacs"]), e["amount"])
+                             for e in (p.get("extras") or [])]
+                        if len(g) != len(plist):
+                            problems.append("第%d段笔数 %d≠%d" % (i + 1, len(g), len(plist)))
+                        else:
+                            for got, want in zip(g, plist):
+                                if got[0] != want[0] or got[1] != want[1] \
+                                        or abs(got[2] - want[2]) > 0.01:
+                                    problems.append("第%d段 %s≠%s" % (i + 1, got, want))
             if len(got_list) != len(expect):
                 problems.append("笔数 %d≠%d" % (len(got_list), len(expect)))
             else:
@@ -152,7 +193,9 @@ def main():
             print("%-34s FAIL  %s" % (text, "、".join(problems)))
             print("%-34s   got=%s" % ("", describe(got_list)))
         else:
-            print("%-34s ok    %s｜盘=%s 号盘=%d" % (text, describe(got_list), market, n_numbers))
+            print("%-34s ok    %s｜盘=%s 号盘=%s"
+                  % (text, describe(got_list), market,
+                     "—" if n_numbers is None else n_numbers))
 
     print("\n共 %d 条，失败 %d 条%s"
           % (len(CASES), len(bad), ("：" + "、".join(bad)) if bad else ""))
