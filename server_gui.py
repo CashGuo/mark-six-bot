@@ -616,8 +616,22 @@ class MainWindow:
         # 组合注左边拉一条竖向隔线：不然中间的「合计」看着像是组合注那一栏的
         tk.Frame(zbp, bg="#b7c0ca", width=2).pack(side="right", fill="y",
                                                  pady=(8, 8), padx=(4, 0))
-        self.combo_box = tk.Frame(self.combo_wrap, bg="#fbfcfd")
-        self.combo_box.pack(fill="both", expand=True, padx=8, pady=4)
+        # 组合注右下角的总计：钉在底部不动，组合注再多也只是上面那块内容滚动
+        self.lb_combo_sum = tk.Label(self.combo_wrap, text="", bg="#fbfcfd",
+                                     fg=CLR_RED, anchor="e",
+                                     font=("Microsoft YaHei UI", 11, "bold"))
+        self.lb_combo_sum.pack(side="bottom", fill="x", padx=8, pady=(0, 3))
+        self.combo_sb = ttk.Scrollbar(self.combo_wrap, orient="vertical")
+        self.combo_cv = tk.Canvas(self.combo_wrap, bg="#fbfcfd", highlightthickness=0,
+                                  bd=0, yscrollcommand=self.combo_sb.set)
+        self.combo_sb.configure(command=self.combo_cv.yview)
+        # 平时不露出来：装得下就别在右边挂一条灰杠，塞不下时 _fit_combo_sb 再 pack
+        self.combo_box = tk.Frame(self.combo_cv, bg="#fbfcfd")
+        self._combo_win = self.combo_cv.create_window((0, 0), window=self.combo_box,
+                                                      anchor="nw")
+        self.combo_box.bind("<Configure>", self._on_combo_box)
+        self.combo_cv.bind("<Configure>", self._on_combo_cv)
+        self.combo_cv.pack(side="left", fill="both", expand=True, padx=(8, 2), pady=(3, 0))
         zin = tk.Frame(zbp, bg=CLR_BG)
         zin.pack(side="left", fill="both", expand=True, padx=(6, 2), pady=(4, 2))
         self._zx_cells = {}
@@ -867,6 +881,7 @@ class MainWindow:
                     agg[key] = a = {"label": lb, "zodiacs": zs, "amount": 0.0}
                 a["amount"] = round(a["amount"] + float(g.get("amount") or 0), 2)
         if not agg:
+            self.lb_combo_sum.configure(text="")
             tk.Label(self.combo_box, text="组合注：本期没有", bg=CLR_BG,
                      fg=CLR_MUTED, font=("Microsoft YaHei UI", 10)).grid(
                          row=0, column=0, sticky="w")
@@ -891,10 +906,54 @@ class MainWindow:
                      fg=CLR_RED, font=("Consolas", 10, "bold")
                      ).grid(row=i, column=2, sticky="e", pady=0)
             total = round(total + g["amount"], 2)
-        tk.Label(self.combo_box, text="合计：%s 元" % fmt_money(total), bg=CLR_BG,
-                 fg="#111827", font=("Microsoft YaHei UI", 9, "bold")
-                 ).grid(row=len(rows), column=0, columnspan=3, sticky="w",
-                        pady=(4, 0))
+        # 合计搬到栏底那一行固定显示，不跟着内容一起滚
+        self.lb_combo_sum.configure(text="合计：%s 元" % fmt_money(total))
+        # 内容区只有这么高，玩法多了靠滚轮翻（canvas 里的子控件不会冒泡，得逐个绑）
+        def _wheel(e):
+            try:
+                self.combo_cv.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            except Exception:
+                pass
+        for w in (self.combo_cv, self.combo_box) + tuple(self.combo_box.winfo_children()):
+            w.bind("<MouseWheel>", _wheel)
+        self.root.after(80, self._fit_combo_sb)
+
+    def _on_combo_box(self, _e):
+        """组合注内容重新排完：更新滚动范围，顺便决定要不要露滚动条。"""
+        try:
+            self.combo_cv.configure(scrollregion=self.combo_cv.bbox("all"))
+        except Exception:
+            pass
+        self._fit_combo_sb()
+
+    def _on_combo_cv(self, e):
+        """组合注内容区尺寸变了：让内容跟宽度走，再看要不要露滚动条。"""
+        try:
+            self.combo_cv.itemconfigure(self._combo_win, width=e.width)
+        except Exception:
+            pass
+        self._fit_combo_sb()
+
+    def _fit_combo_sb(self):
+        """组合注多到装不下才露滚动条，装得下就把那条灰杠收起来。"""
+        try:
+            need = self.combo_box.winfo_reqheight()
+            have = self.combo_cv.winfo_height()
+        except Exception:
+            return
+        if have < 10:
+            return
+        over = need > have + 2
+        try:
+            shown = bool(self.combo_sb.winfo_ismapped())
+        except Exception:
+            return
+        if over and not shown:
+            # 必须插在 canvas 前面：canvas 是 expand 的那个，后 pack 的滚动条会被
+            # 它挤成 0 宽（踩过），用 before 把它排到最右
+            self.combo_sb.pack(side="right", fill="y", pady=(4, 0), before=self.combo_cv)
+        elif not over and shown:
+            self.combo_sb.pack_forget()
 
     def _rescale_grid(self, market):
         """按格子实际高度重算号码盘字号。
