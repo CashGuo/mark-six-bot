@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>原型 · 总览（含生肖注）</title>
+<style>
+:root{
+  --bd:#ccd2da; --bd2:#e3e7ec; --ink:#1b212c; --dim:#78818f;
+  --bg:#f1f3f5; --head:#eaeef2;
+  --red:#c0392b; --blue:#2b6cb0; --green:#2b8a5f;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+ font:13px/1.45 "Microsoft YaHei","Segoe UI",Arial,sans-serif;padding:14px}
+.wrap{max-width:1460px;margin:0 auto}
+
+.bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+ background:#fff;border:1px solid var(--bd);border-radius:5px;
+ padding:9px 14px;margin-bottom:10px}
+.title{font-size:16px;font-weight:700;letter-spacing:1.5px}
+.sumbox{display:flex;align-items:baseline;gap:6px}
+.sum-l{font-size:12px;color:var(--dim)}
+.sum{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--red)}
+.chip{font-size:12px;color:var(--dim);white-space:nowrap}
+.chip b{color:var(--ink);font-weight:600}
+.sp{flex:1}
+.btn{border:1px solid var(--bd);background:#f7f8fa;color:var(--ink);
+ padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12.5px}
+
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:10px;align-items:start}
+.panel{background:#fff;border:1px solid var(--bd);border-radius:5px;overflow:hidden}
+.ph{background:var(--head);border-bottom:1px solid var(--bd);
+ padding:7px 10px;font-size:12.5px;font-weight:600;color:#3d4654;
+ display:flex;justify-content:space-between;align-items:center}
+.ph span{font-weight:400;color:var(--dim);font-size:12px}
+.ph b{color:var(--red);font-variant-numeric:tabular-nums}
+
+.rows{padding:6px}
+.row{display:grid;grid-template-columns:30px repeat(5,1fr);gap:2px;margin-bottom:2px}
+.zod{background:var(--head);border:1px solid var(--bd2);border-radius:3px;
+ display:flex;align-items:center;justify-content:center;
+ font-size:12px;font-weight:600;color:#4a5463}
+.cell{display:flex;align-items:center;gap:5px;border:1px solid var(--bd2);
+ border-radius:3px;padding:2px 5px;background:#fafbfc;min-height:25px}
+.num{width:25px;height:20px;border-radius:3px;color:#fff;font-size:12px;
+ font-weight:600;display:flex;align-items:center;justify-content:center;
+ font-variant-numeric:tabular-nums;flex:0 0 auto}
+.num.r{background:var(--red)} .num.b{background:var(--blue)}
+.num.g{background:var(--green)} .num.n{background:#aab2bd}
+.amt{margin-left:auto;font-variant-numeric:tabular-nums;color:#b0b8c2;font-size:12px}
+.amt.has{color:var(--ink);font-weight:700}
+
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;background:var(--head);color:#3d4654;font-weight:600;
+ padding:6px 8px;border-bottom:1px solid var(--bd);white-space:nowrap;font-size:12px}
+td{padding:5px 8px;border-bottom:1px solid var(--bd2);vertical-align:top}
+td.r,th.r{text-align:right}
+td.num2{font-variant-numeric:tabular-nums;white-space:nowrap}
+td.z{font-weight:600;color:#3d4654}
+.empty{color:var(--dim);text-align:center;padding:18px 0;font-size:12.5px}
+.hot{color:var(--red);font-weight:700}
+
+.sect{margin:14px 0 8px;font-size:13.5px;font-weight:700;color:#3d4654;
+ display:flex;align-items:center;gap:8px}
+.sect .tag{font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:3px;
+ background:#dbeafe;color:#1e40af}
+.sect .tag.hk{background:#fde68a;color:#92400e}
+.sect .tag.mo{background:#dbeafe;color:#1e40af}
+
+.combo{display:inline-block;font-size:11px;padding:1px 6px;border-radius:3px;
+ margin-right:6px;background:#dcfce7;color:#166534;font-weight:600}
+.note{background:#fffbea;border:1px solid #fde68a;border-radius:6px;
+ padding:9px 12px;font-size:12.5px;color:#7a5a00;margin-bottom:12px}
+.foot{margin-top:10px;color:#98a1ad;font-size:12px;padding-left:2px}
+.mini{display:inline-block;padding:0 6px;border-radius:9px;font-size:11px;
+ border:1px solid var(--bd2);color:var(--dim);background:#fafbfc}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="bar">
+    <div class="title">记账中台</div>
+    <div class="sumbox">
+      <span class="sum-l">本期金额</span>
+      <span class="sum" id="grand">—</span>
+    </div>
+    <div class="chip">澳门 <b id="sumMO">—</b></div>
+    <div class="chip">香港 <b id="sumHK">—</b></div>
+    <div class="chip">其中生肖注 <b id="sumZX">—</b></div>
+    <div class="chip">本期 <b>2026-11-17</b></div>
+    <div class="chip">生肖年 <b>马</b></div>
+    <div class="sp"></div>
+    <div class="chip">示例数据，不接账本</div>
+  </div>
+
+<div class="note">
+  这是<b>总览（看板）</b>的原型，不是手工记账界面。重点看两处：
+  <b>① 平特/连肖的钱不在号码盘里</b>，号码盘只显示"逐号注"（每号多少钱）；
+  <b>② 生肖注单独一块</b>，按 12 生肖列出每个肖多少钱；二中二/三中三是组合注，单独一栏、不进生肖表。
+  所有数字都是假的。
+</div>
+
+<!-- 澳门 -->
+<div class="sect"><span class="tag mo">澳门</span>号码盘 + 排序 <span style="font-weight:400;color:#78818f;font-size:12px">只算逐号注</span></div>
+<div class="grid2">
+  <div class="panel">
+    <div class="ph">号码盘（澳门）<span>按生肖分行 · 底色为波色 · 只含逐号注</span></div>
+    <div class="rows" id="gridMO"></div>
+  </div>
+  <div class="panel">
+    <div class="ph">总额大小排序（澳门）<span>有金额的都列</span></div>
+    <div id="riskMO"></div>
+  </div>
+</div>
+
+<!-- 香港 -->
+<div class="sect"><span class="tag hk">香港</span>号码盘 + 排序 <span style="font-weight:400;color:#78818f;font-size:12px">只算逐号注</span></div>
+<div class="grid2">
+  <div class="panel">
+    <div class="ph">号码盘（香港）<span>按生肖分行 · 底色为波色 · 只含逐号注</span></div>
+    <div class="rows" id="gridHK"></div>
+  </div>
+  <div class="panel">
+    <div class="ph">总额大小排序（香港）<span>有金额的都列</span></div>
+    <div id="riskHK"></div>
+  </div>
+</div>
+
+<!-- 生肖注 -->
+<div class="sect"><span class="tag">新增</span>生肖注（平特 / 连肖）<span style="font-weight:400;color:#78818f;font-size:12px">每个肖多少钱，跟号码盘分开</span></div>
+<div class="grid2">
+  <div class="panel">
+    <div class="ph">生肖金额（澳门）<span>平特、连肖按肖记</span></div>
+    <div id="ztMO"></div>
+  </div>
+  <div class="panel">
+    <div class="ph">生肖金额（香港）<span>平特、连肖按肖记</span></div>
+    <div id="ztHK"></div>
+  </div>
+</div>
+
+<!-- 组合注 -->
+<div class="sect"><span class="tag">新增</span>组合注（二中二 / 三中三）<span style="font-weight:400;color:#78818f;font-size:12px">整注金额，不摊到单肖</span></div>
+<div class="panel">
+  <div class="ph">组合注<span>命中条件写清楚，核对时对得上客户原话</span></div>
+  <div id="combo"></div>
+</div>
+
+<!-- 最近记账 -->
+<div class="panel" style="margin-top:14px">
+  <div class="ph">最近记账<span>最新在上</span></div>
+  <div id="recent"></div>
+</div>
+
+<div class="foot">原型 · 数字为示例 · 正式版每 5 秒自动刷新</div>
+</div>
+
+<script>
+var ZODIAC = {
+  "马":[1,13,25,37,49], "蛇":[2,14,26,38], "龙":[3,15,27,39], "兔":[4,16,28,40],
+  "虎":[5,17,29,41],    "牛":[6,18,30,42],  "鼠":[7,19,31,43],  "猪":[8,20,32,44],
+  "狗":[9,21,33,45],    "鸡":[10,22,34,46], "猴":[11,23,35,47], "羊":[12,24,36,48]
+};
+var ORDER = ["马","蛇","龙","兔","虎","牛","鼠","猪","狗","鸡","猴","羊"]; // 盘面行序
+var RED  = [1,2,7,8,12,13,18,19,23,24,29,30,34,35,40,45,46];
+var BLUE = [3,4,9,10,14,15,20,25,26,31,36,37,41,42,47,48];
+
+/* ===== 示例数据（假的） ===== */
+var MO = {
+  nums: { "01":200, "13":150, "07":300 },
+  zx: [
+    { kind:"平特", text:"平特鼠100",     zodiacs:["鼠"],       per:{"鼠":100} },
+    { kind:"平特", text:"平特鼠牛100",   zodiacs:["鼠","牛"],  per:{"鼠":50,"牛":50} },
+    { kind:"连肖", text:"2连肖鼠牛100",  zodiacs:["鼠","牛"],  per:{"鼠":50,"牛":50} }
+  ],
+  combos: []
+};
+var HK = {
+  nums: { "06":100, "18":100, "30":100, "42":100 },
+  zx: [],
+  combos: [
+    { kind:"二中二", text:"鼠+牛 二中二", zodiacs:["鼠","牛"],    amount:100 },
+    { kind:"三中三", text:"鼠+牛+虎 三中三", zodiacs:["鼠","牛","虎"], amount:200 }
+  ]
+};
+
+function fmt(v){
+  var n = Number(v || 0);
+  if (!n) return "0";
+  return n.toFixed(2).replace(/\.00$/,"").replace(/(\.\d)0$/,"$1");
+}
+function pad2(n){ return (n < 10 ? "0" : "") + n; }
+function numCls(n){
+  if (RED.indexOf(n) >= 0) return "r";
+  if (BLUE.indexOf(n) >= 0) return "b";
+  return "g";
+}
+
+/* ===== 号码盘 ===== */
+function drawGrid(elId, nums){
+  var box = document.getElementById(elId);
+  var html = "";
+  ORDER.forEach(function(z){
+    html += '<div class="row"><div class="zod">' + z + "</div>";
+    ZODIAC[z].forEach(function(n){
+      var key = pad2(n);
+      var v = nums[key] || 0;
+      html += '<div class="cell"><span class="num ' + numCls(n) + '">' + key + "</span>"
+            + '<span class="amt' + (v ? " has" : "") + '">' + (v ? fmt(v) : "—") + "</span></div>";
+    });
+    html += "</div>";
+  });
+  box.innerHTML = html;
+}
+
+/* ===== 排序 ===== */
+function drawRisk(elId, nums, extra){
+  var rows = [];
+  Object.keys(nums).forEach(function(k){
+    if (nums[k]) rows.push({ k:k, v:nums[k] });
+  });
+  rows.sort(function(a,b){ return b.v - a.v; });
+  var html;
+  if (!rows.length){
+    html = '<div class="empty">本期这个盘还没有逐号注</div>';
+  } else {
+    var sum = 0;
+    html = '<table><thead><tr><th>号码</th><th class="r">金额</th></tr></thead><tbody>';
+    rows.forEach(function(r){
+      sum += r.v;
+      html += '<tr><td><span class="num ' + numCls(parseInt(r.k,10)) + '">' + r.k + "</span></td>"
+            + '<td class="r num2">' + fmt(r.v) + "</td></tr>";
+    });
+    html += '<tr><td class="z">逐号注合计</td><td class="r num2 hot">' + fmt(sum) + "</td></tr>";
+    html += "</tbody></table>";
+  }
+  if (extra) html += extra;
+  document.getElementById(elId).innerHTML = html;
+}
+
+/* ===== 生肖表 ===== */
+function zodiacTotals(zx){
+  var t = {};
+  ORDER.forEach(function(z){ t[z] = { pt:0, lx:0 }; });
+  zx.forEach(function(x){
+    var col = x.kind === "平特" ? "pt" : "lx";
+    x.zodiacs.forEach(function(z){
+      t[z][col] = Math.round((t[z][col] + (x.per[z] || 0)) * 100) / 100;
+    });
+  });
+  return t;
+}
+
+function drawZTable(elId, zx){
+  var t = zodiacTotals(zx);
+  var html = '<table><thead><tr><th>生肖</th><th class="r">平特</th>'
+           + '<th class="r">连肖</th><th class="r">合计</th></tr></thead><tbody>';
+  var sum = 0;
+  ORDER.forEach(function(z){
+    var pt = t[z].pt, lx = t[z].lx, all = Math.round((pt + lx) * 100) / 100;
+    sum += all;
+    html += '<tr><td class="z">' + z + "</td>"
+          + '<td class="r num2">' + (pt ? fmt(pt) : '<span style="color:#c0c7cf">0</span>') + "</td>"
+          + '<td class="r num2">' + (lx ? fmt(lx) : '<span style="color:#c0c7cf">0</span>') + "</td>"
+          + '<td class="r num2' + (all ? " hot" : "") + '">' + fmt(all) + "</td></tr>";
+  });
+  html += '<tr><td class="z">生肖注合计</td><td class="r num2">' + fmt(sumPct(t,"pt"))
+        + '</td><td class="r num2">' + fmt(sumPct(t,"lx"))
+        + '</td><td class="r num2 hot">' + fmt(sum) + "</td></tr>";
+  html += "</tbody></table>";
+  document.getElementById(elId).innerHTML = html;
+}
+function sumPct(t, col){
+  var s = 0;
+  ORDER.forEach(function(z){ s += t[z][col]; });
+  return Math.round(s * 100) / 100;
+}
+
+/* ===== 组合注 ===== */
+function drawCombo(){
+  var rows = [];
+  MO.combos.forEach(function(c){ rows.push({ mk:"澳门", c:c }); });
+  HK.combos.forEach(function(c){ rows.push({ mk:"香港", c:c }); });
+  var html;
+  if (!rows.length){
+    html = '<div class="empty">本期没有二中二/三中三</div>';
+  } else {
+    html = '<table><thead><tr><th style="width:70px">市场</th><th>这一注</th>'
+         + '<th>命中条件</th><th class="r" style="width:110px">金额</th>'
+         + '<th style="width:130px">挂在谁名下</th></tr></thead><tbody>';
+    rows.forEach(function(r){
+      var hits = r.c.zodiacs.join("、");
+      var need = r.c.zodiacs.length;
+      html += '<tr><td class="z">' + r.mk + "</td>"
+            + '<td><span class="combo">' + r.c.kind + "</span>" + r.c.text + "</td>"
+            + '<td style="color:#5b6675">开奖 6 个平特号里同时有 ' + hits
+            + "（" + need + " 个肖都得出）</td>"
+            + '<td class="r num2 hot">' + fmt(r.c.amount) + "</td>"
+            + '<td style="color:#1f6feb;font-weight:600">Cash很👌🏻</td></tr>';
+    });
+    var sum = 0;
+    rows.forEach(function(r){ sum += r.c.amount; });
+    html += '<tr><td class="z">合计</td><td></td><td></td>'
+          + '<td class="r num2 hot">' + fmt(sum) + "</td><td></td></tr>";
+    html += "</tbody></table>";
+  }
+  document.getElementById("combo").innerHTML = html;
+}
+
+/* ===== 最近记账 ===== */
+function drawRecent(){
+  var rows = [
+    ["11-15 20:14","Cash很👌🏻","香港","鼠+牛 二中二 100","—","100","组合注"],
+    ["11-15 19:50","Cash很👌🏻","香港","06 18 30 42 各100","4","400","逐号"],
+    ["11-15 18:02","Cash很👌🏻","澳门","平特鼠牛 共100","—","100","生肖注"],
+    ["11-15 17:40","Cash很👌🏻","澳门","2连肖鼠牛 共100","—","100","生肖注"],
+    ["11-15 16:28","Cash很👌🏻","澳门","平特鼠 100","—","100","生肖注"],
+    ["11-15 15:10","Cash很👌🏻","澳门","01 07 13 各50","3","150","逐号"]
+  ];
+  var html = '<table><thead><tr><th style="width:96px">时间</th><th style="width:130px">挂在谁名下</th>'
+           + '<th style="width:60px">市场</th><th>记什么</th><th class="r" style="width:60px">号数</th>'
+           + '<th class="r" style="width:80px">金额</th><th style="width:76px">类型</th></tr></thead><tbody>';
+  rows.forEach(function(r){
+    var cls = r[6] === "组合注" ? "combo" : "";
+    html += "<tr><td class='num2'>" + r[0] + "</td><td style='color:#1f6feb;font-weight:600'>" + r[1]
+          + "</td><td>" + r[2] + "</td><td>" + r[3] + "</td>"
+          + "<td class='r num2'>" + r[4] + "</td><td class='r num2'>" + r[5] + "</td>"
+          + "<td><span class='mini'>" + r[6] + "</span></td></tr>";
+  });
+  html += "</tbody></table>";
+  document.getElementById("recent").innerHTML = html;
+}
+
+/* ===== 总账 ===== */
+function sumObj(o){
+  var s = 0;
+  for (var k in o) s += Number(o[k] || 0);
+  return Math.round(s * 100) / 100;
+}
+function zxSum(zx){
+  var s = 0;
+  zx.forEach(function(x){
+    var t = 0;
+    x.zodiacs.forEach(function(z){ t += x.per[z] || 0; });
+    s += t;
+  });
+  return Math.round(s * 100) / 100;
+}
+function comboSum(cs){
+  var s = 0;
+  cs.forEach(function(c){ s += c.amount; });
+  return Math.round(s * 100) / 100;
+}
+
+drawGrid("gridMO", MO.nums);
+drawGrid("gridHK", HK.nums);
+drawRisk("riskMO", MO.nums, "");
+drawRisk("riskHK", HK.nums, "");
+drawZTable("ztMO", MO.zx);
+drawZTable("ztHK", HK.zx);
+drawCombo();
+drawRecent();
+
+var moTotal = sumObj(MO.nums) + zxSum(MO.zx) + comboSum(MO.combos);
+var hkTotal = sumObj(HK.nums) + zxSum(HK.zx) + comboSum(HK.combos);
+document.getElementById("grand").textContent = fmt(moTotal + hkTotal);
+document.getElementById("sumMO").textContent = fmt(moTotal);
+document.getElementById("sumHK").textContent = fmt(hkTotal);
+document.getElementById("sumZX").textContent = fmt(zxSum(MO.zx) + zxSum(HK.zx) + comboSum(MO.combos) + comboSum(HK.combos));
+</script>
+</body>
+</html>

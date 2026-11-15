@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>原型 · 平特/连肖/二中二（手工记账）</title>
+<style>
+:root{
+  --bd:#ccd2da; --bd2:#e3e7ec; --ink:#1b212c; --dim:#78818f;
+  --bg:#f1f3f5; --head:#eaeef2;
+  --red:#c0392b; --blue:#2b6cb0; --green:#2b8a5f;
+  --pick:#111827; --gold:#f59e0b;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+ font:14.5px/1.5 "Microsoft YaHei","Segoe UI",Arial,sans-serif;padding:12px}
+.wrap{max-width:1440px;margin:0 auto}
+.bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+ background:#fff;border:1px solid var(--bd);border-radius:6px;padding:8px 14px;margin-bottom:10px}
+.title{font-size:17px;font-weight:700;letter-spacing:1px}
+.seg{display:inline-flex;border:1px solid var(--bd);border-radius:5px;overflow:hidden}
+.seg button{border:0;background:#f7f8fa;color:#374151;padding:6px 16px;cursor:pointer;font-size:13px}
+.seg button.on{background:var(--blue);color:#fff;font-weight:600}
+.lbl{font-size:12.5px;color:var(--dim)}
+input{border:1px solid var(--bd);border-radius:4px;padding:6px 8px;font-size:13px;
+ font-family:inherit;background:#fff;color:var(--ink)}
+input:focus{outline:2px solid #bfd4ee;outline-offset:-1px}
+.btn{border:1px solid var(--bd);background:#f7f8fa;color:var(--ink);
+ padding:7px 14px;border-radius:5px;cursor:pointer;font-size:13px}
+.btn:hover{background:#eef1f4}
+.btn.pri{background:var(--blue);color:#fff;border-color:var(--blue);font-weight:600}
+.sp{flex:1}
+
+.main{display:grid;grid-template-columns:minmax(0,1fr) 500px;gap:12px;align-items:start}
+.panel{background:#fff;border:1px solid var(--bd);border-radius:6px;overflow:hidden;margin-bottom:12px}
+.ph{background:var(--head);border-bottom:1px solid var(--bd);padding:8px 12px;
+ font-size:13.5px;font-weight:600;color:#3d4654;display:flex;justify-content:space-between;align-items:center}
+.ph span{font-weight:400;color:var(--dim);font-size:12.5px}
+.pad{padding:10px 12px}
+
+.numpad{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.nb{border:2px solid transparent;border-radius:5px;color:#fff;
+ font:700 22px/1 "Consolas",monospace;display:flex;align-items:center;justify-content:center;
+ height:48px;cursor:default}
+.nb.r{background:var(--red)} .nb.b{background:var(--blue)} .nb.g{background:var(--green)}
+
+.zrow{display:flex;flex-wrap:wrap;gap:6px}
+.zb{border:1px solid var(--bd);background:#eef0f3;color:#374151;border-radius:4px;
+ padding:8px 14px;font-size:17px;cursor:pointer;min-width:58px;text-align:center}
+.zb.on{background:#fde68a;border-color:var(--gold);color:#92400e;font-weight:700}
+
+.rowline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
+.prev{margin-top:10px;border:1px dashed var(--bd);border-radius:5px;padding:8px 10px;
+ font-size:13px;color:#4a5462;background:#fafbfc;min-height:38px}
+.prev b{color:var(--blue)}
+
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:5px 8px;border-bottom:1px solid var(--bd2);text-align:right}
+th:first-child,td:first-child{text-align:left}
+th{background:#f7f8fa;color:#4a5462;font-weight:600;font-size:12.5px}
+td.z{font-weight:600}
+td.off{color:#b8bfc8}
+
+.list td.each, .list td.sub{font-variant-numeric:tabular-nums}
+.tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:3px;margin-left:6px;
+ vertical-align:middle}
+.tag.pt{background:#fde68a;color:#92400e}
+.tag.lx{background:#dbeafe;color:#1e40af}
+.tag.zh{background:#dcfce7;color:#166534}
+.empty{color:var(--dim);font-size:13px;padding:10px 0}
+.sum{display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid var(--bd);
+ background:#fafbfc}
+.sumbig{font-size:20px;font-weight:700;color:var(--red)}
+.note{background:#fffbea;border:1px solid #fde68a;border-radius:6px;padding:10px 12px;
+ font-size:13px;color:#7a5a00;margin-bottom:12px}
+h4{margin:0 0 6px;font-size:13px;color:#4a5462;font-weight:600}
+.legend{font-size:12px;color:var(--dim);margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="bar">
+  <span class="title">手工记账</span>
+  <div class="seg">
+    <button>澳门</button><button class="on">香港</button>
+  </div>
+  <span class="lbl">记入账号</span>
+  <input value="g18959290733" style="width:150px" readonly>
+  <span class="lbl">挂在谁名下</span>
+  <input value="Cash很👌🏻" style="width:130px" readonly>
+  <span class="sp"></span>
+  <span class="lbl">马年 · 平特/连肖/二中二 原型（假数据，不接账本）</span>
+</div>
+
+<div class="note">
+  这是给老板看的<b>界面原型</b>：可以点生肖、切玩法、切「共/各」、点加入，看清单和生肖金额表怎么变。
+  页面里的数字都是假数据，不写任何账本。
+</div>
+
+<div class="main">
+  <!-- 左：号码盘 -->
+  <div>
+    <div class="panel">
+      <div class="ph">号码盘<span>这块这次不动</span></div>
+      <div class="pad"><div class="numpad" id="numpad"></div></div>
+      <div class="pad" style="border-top:1px solid var(--bd2);color:var(--dim);font-size:12.5px;line-height:1.7">
+        正式版里左栏下面是生肖盘和 43 个玩法按钮，窗口加宽加高后这里不会有空白；
+        原型只演示新增的「生肖注」那块，所以下面留着了。
+      </div>
+    </div>
+  </div>
+
+  <!-- 右 -->
+  <div>
+    <!-- 生肖注面板 -->
+    <div class="panel">
+      <div class="ph">生肖注（平特 / 连肖 / 二中二）<span>新增的一块</span></div>
+      <div class="pad">
+        <div class="seg" id="modes">
+          <button class="on" data-mode="pt">平特</button>
+          <button data-mode="lx">连肖</button>
+          <button data-mode="zh2">二中二</button>
+          <button data-mode="zh3">三中三</button>
+        </div>
+
+        <div class="zrow" id="zsx" style="margin-top:10px"></div>
+
+        <div class="rowline">
+          <div class="seg" id="splits">
+            <button class="on" data-split="share">共（分摊到每个肖）</button>
+            <button data-split="each">各（每个肖各这么多）</button>
+          </div>
+          <input id="amt" value="100" style="width:78px;text-align:right">
+          <button class="btn pri" id="add">加入</button>
+        </div>
+
+        <div class="prev" id="prev"></div>
+        <div class="legend" id="legend"></div>
+      </div>
+    </div>
+
+    <!-- 清单 -->
+    <div class="panel">
+      <div class="ph">本次要记的<span id="cnt">1 注</span></div>
+      <table class="list"><thead>
+        <tr><th>记什么</th><th style="width:90px">每肖 / 整注</th><th style="width:90px">小计</th></tr>
+      </thead><tbody id="notes"></tbody></table>
+      <div class="sum">
+        <span class="lbl">合计</span>
+        <span class="sumbig" id="total">0</span>
+        <span class="lbl" id="sub"></span>
+        <span class="sp"></span>
+        <button class="btn">清空</button>
+        <input type="checkbox" checked> <span class="lbl">连续记账</span>
+        <button class="btn pri">记账</button>
+      </div>
+    </div>
+
+    <!-- 生肖金额表 -->
+    <div class="panel">
+      <div class="ph">本期生肖金额<span>平特、连肖按肖记；二中二/三中三是组合注，不摊到单肖</span></div>
+      <table><thead>
+        <tr><th>生肖</th><th>平特</th><th>连肖</th><th>合计</th></tr>
+      </thead><tbody id="ztable"></tbody></table>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+/* ===== 2026 马年：生肖 → 号码（真实表） ===== */
+var ZODIAC = {
+  "马":[1,13,25,37,49], "蛇":[2,14,26,38], "龙":[3,15,27,39], "兔":[4,16,28,40],
+  "虎":[5,17,29,41],    "牛":[6,18,30,42],  "鼠":[7,19,31,43],  "猪":[8,20,32,44],
+  "狗":[9,21,33,45],    "鸡":[10,22,34,46], "猴":[11,23,35,47], "羊":[12,24,36,48]
+};
+/* 生肖顺序（连肖按这个顺序往后连） */
+var ORDER = ["鼠","牛","虎","兔","龙","蛇","马","羊","猴","鸡","狗","猪"];
+/* 真实波色表 */
+var RED  = [1,2,7,8,12,13,18,19,23,24,29,30,34,35,40,45,46];
+var BLUE = [3,4,9,10,14,15,20,25,26,31,36,37,41,42,47,48];
+
+/* ===== 状态 ===== */
+var mode = "pt";
+var split = "share";
+var picked = ["鼠"];          // 选中的生肖
+var notes = [];               // 清单
+
+/* ===== 号码盘 ===== */
+(function(){
+  var box = document.getElementById("numpad");
+  for (var n = 1; n <= 49; n++) {
+    var d = document.createElement("div");
+    var c = RED.indexOf(n) >= 0 ? "r" : (BLUE.indexOf(n) >= 0 ? "b" : "g");
+    d.className = "nb " + c;
+    d.textContent = (n < 10 ? "0" : "") + n;
+    box.appendChild(d);
+  }
+})();
+
+/* ===== 生肖按钮 ===== */
+(function(){
+  var box = document.getElementById("zsx");
+  ORDER.forEach(function(z){
+    var b = document.createElement("div");
+    b.className = "zb" + (picked.indexOf(z) >= 0 ? " on" : "");
+    b.textContent = z;
+    b.onclick = function(){
+      var i = picked.indexOf(z);
+      if (i >= 0) picked.splice(i,1); else picked.push(z);
+      drawZ();
+      drawPrev();
+    };
+    box.appendChild(b);
+  });
+})();
+
+function drawZ(){
+  var bs = document.getElementById("zsx").children;
+  for (var i = 0; i < bs.length; i++) {
+    var z = bs[i].textContent;
+    bs[i].className = "zb" + (picked.indexOf(z) >= 0 ? " on" : "");
+  }
+}
+
+/* ===== 模式 / 共各 ===== */
+document.getElementById("modes").onclick = function(e){
+  var b = e.target.closest("button"); if (!b) return;
+  [].forEach.call(this.children, function(x){ x.classList.remove("on"); });
+  b.classList.add("on"); mode = b.dataset.mode; drawPrev();
+};
+document.getElementById("splits").onclick = function(e){
+  var b = e.target.closest("button"); if (!b) return;
+  [].forEach.call(this.children, function(x){ x.classList.remove("on"); });
+  b.classList.add("on"); split = b.dataset.split; drawPrev();
+};
+
+/* 连肖：包成 N 个连续生肖（写一个肖就往后补） */
+function lxSet(){
+  var n = { "lx": 2, "zh2": 2, "zh3": 3 }[mode] || 2;
+  if (mode === "zh2" || mode === "zh3") return picked.slice();
+  var start = picked[0];
+  var i = ORDER.indexOf(start);
+  var out = [];
+  for (var k = 0; k < n; k++) out.push(ORDER[(i + k) % 12]);
+  return out;
+}
+
+function curSet(){
+  if (mode === "pt") return picked.slice();
+  return lxSet();
+}
+
+/* ===== 预览 ===== */
+function drawPrev(){
+  var amt = parseFloat(document.getElementById("amt").value) || 0;
+  var set = curSet();
+  var el = document.getElementById("prev");
+  var lg = document.getElementById("legend");
+
+  if (!set.length) {
+    el.innerHTML = "先点生肖。";
+    lg.textContent = "";
+    return;
+  }
+  var name = { pt:"平特", lx:(set.length + "连肖"), zh2:"二中二", zh3:"三中三" }[mode];
+  var nums = [];
+  if (mode === "pt" || mode === "lx") {
+    set.forEach(function(z){ nums = nums.concat(ZODIAC[z]); });
+  }
+
+  if (mode === "zh2" || mode === "zh3") {
+    el.innerHTML = "<b>" + name + " " + set.join("") + "</b> → 一注 <b>" + amt + "</b> 元，"
+      + "不走号码盘、不摊到单肖；命中条件是开奖 6 个平特号里同时有 "
+      + set.join("、") + "";
+    lg.textContent = "这类是组合注，钱记在整注上，生肖金额表里不出现单肖数字。";
+    return;
+  }
+
+  var per = split === "each" ? amt : (set.length ? amt / set.length : 0);
+  el.innerHTML = "<b>" + name + " " + set.join("+") + "</b> "
+    + (picked.length > 1 && split === "share" ? "共 " + amt : "各 " + amt)
+    + " → 每肖 <b>" + fmt(per) + "</b>，总额 <b>" + fmt(per * set.length) + "</b> 元"
+    + (nums.length ? "，覆盖 " + nums.length + " 个号" : "");
+  lg.textContent = split === "share"
+    ? "「共」＝这一串生肖加起来一共这么多，平均摊到每个肖（除不尽按到分，余数给第一个肖）。"
+    : "「各」＝每个肖各记这么多。";
+}
+
+function fmt(v){
+  return (Math.round(v * 100) / 100).toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+}
+
+/* ===== 加入 ===== */
+document.getElementById("add").onclick = function(){
+  var amt = parseFloat(document.getElementById("amt").value) || 0;
+  var set = curSet();
+  if (!set.length || amt <= 0) { return; }
+  var kind = mode, name = { pt:"平特", lx:(set.length + "连肖"), zh2:"二中二", zh3:"三中三"}[mode];
+  var share = (mode === "pt" || mode === "lx");
+  var per = split === "each" ? amt : amt / set.length;
+  var total = share ? per * set.length : amt;
+
+  // 共：按到分分摊，余数给第一个肖
+  var perMap = {};
+  if (share) {
+    if (split === "each") { set.forEach(function(z){ perMap[z] = amt; }); }
+    else {
+      var each = Math.floor(amt / set.length * 100) / 100;
+      set.forEach(function(z){ perMap[z] = each; });
+      perMap[set[0]] = Math.round((amt - each * (set.length - 1)) * 100) / 100;
+    }
+  }
+
+  notes.push({
+    kind: kind, zodiacs: set, share: share,
+    text: name + " " + set.join("+"),
+    per: share ? perMap : null,
+    amount: Math.round(total * 100) / 100,
+    splitMode: split
+  });
+  drawNotes(); drawZTable(); drawPrev();
+};
+
+/* ===== 清单 ===== */
+function drawNotes(){
+  var tb = document.getElementById("notes");
+  var sum = 0;
+  if (!notes.length) {
+    tb.innerHTML = '<tr><td colspan="3" class="empty">还没有要记的，点上面生肖再「加入」。</td></tr>';
+  } else {
+    var html = "";
+    notes.forEach(function(n, i){
+      var tag = { pt:'<span class="tag pt">平特</span>',
+                  lx:'<span class="tag lx">连肖</span>',
+                  zh2:'<span class="tag zh">二中二</span>',
+                  zh3:'<span class="tag zh">三中三</span>' }[n.kind];
+      var each, sub = n.amount;
+      if (n.share) {
+        var ps = n.zodiacs.map(function(z){ return fmt(n.per[z]); });
+        each = n.splitMode === "each" ? ("每肖 " + fmt(n.per[n.zodiacs[0]]))
+              : ("分摊 " + ps.join(" / "));
+      } else {
+        each = "整注";
+      }
+      sum += n.amount;
+      html += "<tr><td>" + (i+1) + ". " + n.text + tag + "</td>"
+            + "<td class='each'>" + each + "</td>"
+            + "<td class='sub'>" + fmt(sub) + "</td></tr>";
+    });
+    tb.innerHTML = html;
+  }
+  var numsCnt = 0;
+  document.getElementById("total").textContent = fmt(sum);
+  document.getElementById("sub").textContent =
+    "生肖注 " + notes.length + " 注";
+  document.getElementById("cnt").textContent = notes.length + " 注";
+}
+
+/* ===== 生肖金额表 ===== */
+function drawZTable(){
+  var pt = {}, lx = {};
+  ORDER.forEach(function(z){ pt[z] = 0; lx[z] = 0; });
+  notes.forEach(function(n){
+    if (!n.share) return;
+    var tgt = n.kind === "pt" ? pt : (n.kind === "lx" ? lx : null);
+    if (!tgt) return;
+    n.zodiacs.forEach(function(z){
+      if (z in tgt) tgt[z] = Math.round((tgt[z] + (n.per[z] || 0)) * 100) / 100;
+    });
+  });
+  var tb = document.getElementById("ztable");
+  var html = "";
+  ORDER.forEach(function(z){
+    var t = Math.round((pt[z] + lx[z]) * 100) / 100;
+    html += "<tr><td class='z'>" + z + "</td>"
+          + "<td class='" + (pt[z] ? "" : "off") + "'>" + fmt(pt[z]) + "</td>"
+          + "<td class='" + (lx[z] ? "" : "off") + "'>" + fmt(lx[z]) + "</td>"
+          + "<td><b>" + fmt(t) + "</b></td></tr>";
+  });
+  tb.innerHTML = html;
+}
+
+/* ===== 预置三注示例，打开就能看到效果 ===== */
+notes = [
+  { kind:"pt", zodiacs:["鼠"], share:true, text:"平特 鼠", splitMode:"each",
+    per:{ "鼠":100 }, amount:100 },
+  { kind:"pt", zodiacs:["鼠","牛"], share:true, text:"平特 鼠+牛", splitMode:"share",
+    per:{ "鼠":50, "牛":50 }, amount:100 },
+  { kind:"lx", zodiacs:["鼠","牛"], share:true, text:"2连肖 鼠+牛", splitMode:"share",
+    per:{ "鼠":50, "牛":50 }, amount:100 },
+  { kind:"zh2", zodiacs:["鼠","牛"], share:false, text:"二中二 鼠+牛",
+    per:null, amount:100, splitMode:"share" }
+];
+
+drawPrev(); drawNotes(); drawZTable();
+</script>
+</body>
+</html>

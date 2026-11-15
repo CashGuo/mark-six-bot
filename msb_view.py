@@ -296,7 +296,9 @@ def zodiac_board(account: str = "", market: str = "MO") -> dict:
         except Exception:
             amt = 0.0
         play = str(it.get("play") or "")
-        zs = extract_zodiacs(text)
+        # 记账时存下来的字段优先（新注都有）；老注没存，只能从原文推
+        zs = [ch for ch in str(it.get("zodiacs") or "") if ch in ZODIAC_ANIMALS] \
+            or extract_zodiacs(text)
         if play == "zhong" or ("中" in text and "连肖" not in text and "平" not in text):
             combo.append({"text": text, "amount": amt, "zodiacs": zs,
                           "ts": str(it.get("ts") or ""),
@@ -309,20 +311,25 @@ def zodiac_board(account: str = "", market: str = "MO") -> dict:
                             "ts": str(it.get("ts") or "")})
             tot["unknown"] = round(tot["unknown"] + amt, 2)
             continue
-        kind = "lianxiao" if (play == "lianxiao" or "连肖" in text) else "pingte"
-        if kind == "lianxiao":
+        kind = str(it.get("kind") or "")
+        if kind not in ("pingte", "lianxiao"):
+            kind = "lianxiao" if (play == "lianxiao" or "连肖" in text) else "pingte"
+        if kind == "lianxiao" and "zodiacs" not in it:
             n = lian_len(text)
             if len(zs) < n:
                 i = ZODIAC_ANIMALS.index(zs[0])
                 zs = [ZODIAC_ANIMALS[(i + k) % 12] for k in range(n)]
         n = len(zs)
-        m_each = re.search(r"各\s*(\d+(?:\.\d+)?)", text)
-        each_one = None
-        if m_each:
-            try:
-                each_one = float(m_each.group(1))
-            except Exception:
-                each_one = None
+        if "each" in it:
+            each_one = amt / n if it.get("each") and n else None
+        else:
+            m_each = re.search(r"各\s*(\d+(?:\.\d+)?)", text)
+            each_one = None
+            if m_each:
+                try:
+                    each_one = float(m_each.group(1))
+                except Exception:
+                    each_one = None
         if each_one is not None:
             per = {z: round(each_one, 2) for z in zs}
         else:

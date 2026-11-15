@@ -1455,6 +1455,10 @@ def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
                     "text": e.get("text") or "",
                     "amount": amt,
                     "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    # 这三个字段让总览/网页看板不必再猜原文：哪类注、哪几个肖、是否各付
+                    "kind": e.get("kind") or "",
+                    "zodiacs": e.get("zodiacs") or "",
+                    "each": bool(e.get("each")),
                 })
                 extra_total = round(extra_total + amt, 2)
             od["total"] = round(float(od.get("total") or 0) + extra_total, 2)
@@ -2794,6 +2798,8 @@ def api_manual_submit():
         if not t or a <= 0:
             continue
         notes.append({"text": t, "each": a,
+                      # 生肖注（平特/连肖/中二）自带整句写法，不参与号码注的拼句
+                      "flat": bool((n or {}).get("flat")),
                       "nums": [str(x) for x in ((n or {}).get("nums") or [])]})
     if not notes:
         return jsonify({"ok": False, "error": "清单是空的"})
@@ -2823,23 +2829,33 @@ def api_manual_submit():
                 detail.append(str(r.get("detail")))
         return r
 
-    joined = manual_plays.join_text(notes)
-    if manual_plays.verify_join(mapping, notes, joined):
-        r = _one(joined, base)
-        if not r.get("ok"):
-            return jsonify({"ok": False,
-                            "error": r.get("error") or r.get("reason") or "记账失败"})
+    fails = []
+    normal = [n for n in notes if not n["flat"]]
+    # 生肖注不进号码盘，每注就是一句完整原文，单独落一笔
+    for i, n in enumerate([x for x in notes if x["flat"]]):
+        rr = _one(n["text"], "%s-f%d" % (base, i + 1))
+        if not rr.get("ok"):
+            fails.append("%s：%s" % (n["text"],
+                                    rr.get("error") or rr.get("reason") or "失败"))
+
+    if normal:
+        joined = manual_plays.join_text(normal)
+        if manual_plays.verify_join(mapping, normal, joined):
+            r = _one(joined, base)
+            if not r.get("ok"):
+                fails.append(r.get("error") or r.get("reason") or "记账失败")
+        else:
+            for i, n in enumerate(normal):
+                rr = _one("%s各%s" % (n["text"], manual_plays.amount_str(n["each"])),
+                          "%s-%d" % (base, i + 1))
+                if not rr.get("ok"):
+                    fails.append("第%d注：%s"
+                                 % (i + 1, rr.get("error") or rr.get("reason") or "失败"))
     else:
-        fails = []
-        for i, n in enumerate(notes):
-            rr = _one("%s各%s" % (n["text"], manual_plays.amount_str(n["each"])),
-                      "%s-%d" % (base, i + 1))
-            if not rr.get("ok"):
-                fails.append("第%d注：%s"
-                             % (i + 1, rr.get("error") or rr.get("reason") or "失败"))
-        if fails:
-            return jsonify({"ok": False, "error": "；".join(fails),
-                            "partial": round(total, 2)})
+        joined = "；".join(n["text"] for n in notes)
+    if fails:
+        return jsonify({"ok": False, "error": "；".join(fails),
+                        "partial": round(total, 2)})
 
     out = {"ok": True, "market": market,
            "market_name": "香港" if market == "HK" else "澳门",

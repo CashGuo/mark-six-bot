@@ -126,6 +126,9 @@ _PUNCT = {"。": ",", "；": ";", "，": ",", "、": ",", "·": "."}
 # 12/13/14 关键词：暂不支持，直接判失败
 _UNSUPPORTED = re.compile(r"(中特|特肖)")
 
+# 生肖传统序：连肖补位按这个顺序往后数（鼠3连肖 = 鼠牛虎）
+SX_ORDER = "鼠牛虎兔龙蛇马羊猴鸡狗猪"
+
 # 港澳标记
 HK_MARKS = ("香", "港", "巷")
 MO_MARKS = ("奥", "澳", "门")
@@ -275,8 +278,23 @@ def _r_pingte(m, zodiac):
 
 
 def _r_lianxiao(m, zodiac):
-    """13 连肖：这几个肖的号码并集，每个号各记单价。"""
-    return _sx_union(m.group(2), zodiac)
+    """13 连肖（生肖在前）：鼠二连肖 / 鼠牛三连肖。整笔金额，不落号码盘。"""
+    return _sx_union(m.group(1), zodiac)
+
+
+def _r_lianxiao2(m, zodiac):
+    """13 连肖（生肖在后）：二连肖鼠 / 三连肖鼠牛。"""
+    return _sx_union(m.group(1), zodiac)
+
+
+def _r_zhong_sx(m, zodiac):
+    """14 中二/中三（生肖在前）：鼠牛二中二 / 鼠牛虎三中三。整注一笔。"""
+    return _sx_union(m.group(1), zodiac)
+
+
+def _r_zhong2(m, zodiac):
+    """14 中二/中三（生肖在后）：二中二鼠牛。"""
+    return _sx_union(m.group(1), zodiac)
 
 
 def _r_zhong(m, zodiac):
@@ -367,16 +385,30 @@ PLAYS: List[Play] = sorted([
 def _zodiac_plays(zodiac: Dict[str, List[str]]) -> List[Play]:
     """生肖是每年的表，得动态生成；优先级最低，别抢走别的玩法。
 
-    12/13 也要生肖表，所以一起在这儿建：
-      平特鼠100   整肖共 100，不落号码盘
-      二连肖鼠牛各20  鼠+牛 9 个号各 20，落号码盘
+    12/13/14 的三种玩法都在这里，口径是「整笔金额，不落号码盘」：
+      平特鼠100       整肖 100
+      平特鼠牛100     鼠+牛 共 100（分摊交给展示层算）
+      平特鼠牛各100   鼠 100 + 牛 100 = 200
+      鼠二连肖100     鼠+牛 共 100；二连肖鼠100 同义
+      鼠3连肖300      鼠牛虎 共 300
+      鼠牛二中二100   整注 100，不下号码盘
     """
     sxs = "|".join(re.escape(sx) for sx in zodiac)
     out = [
         Play("pingte", "平特", r"(?:平特|平码|平肖|平)((?:%s)+)" % sxs,
              _r_pingte, 95, mode="flat"),
-        Play("lianxiao", "连肖", r"([二三四五]?)连肖\s*((?:%s)+)" % sxs,
-             _r_lianxiao, 92),
+        # 连肖两种语序都认：鼠二连肖 / 二连肖鼠；位数可写可不写
+        Play("lianxiao", "连肖",
+             r"((?:%s)+)\s*[一二两三四五六1-6]?\s*连肖" % sxs,
+             _r_lianxiao, 93, mode="flat"),
+        Play("lianxiao", "连肖",
+             r"[一二两三四五六1-6]?\s*连肖\s*((?:%s)+)" % sxs,
+             _r_lianxiao2, 93, mode="flat"),
+        # 中二/中三：生肖在前或在后都认，整注一笔
+        Play("zhong", "中二/中三", r"((?:%s)+)\s*(?:二中二|三中二|三中三)" % sxs,
+             _r_zhong_sx, 94, mode="flat"),
+        Play("zhong", "中二/中三", r"(?:二中二|三中二|三中三)\s*((?:%s)+)" % sxs,
+             _r_zhong2, 94, mode="flat"),
     ]
     out += [Play("zodiac:%s" % sx, "生肖", r"(%s)" % re.escape(sx), _r_zodiac, 40)
             for sx in zodiac]
@@ -635,12 +667,18 @@ def parse_item(raw: str, zodiac: Dict[str, List[str]], sx_chars: str) -> Optiona
 
     extra, leftover = _take_numbers(rest)
     if leftover.strip():
-        return None                      # 还有认不出的碎片，整项交模型
+        # flat 项（平特/连肖/中二）末尾剩下的数字就是整笔金额：
+        # "鼠牛二中二100" 里的 100 不可能是号码（号码最大 49），只能当钱。
+        tail = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*", leftover)
+        if flat and tail and float(tail.group(1)) > 49:
+            unit = float(tail.group(1))
+        else:
+            return None                      # 还有认不出的碎片，整项交模型
     if extra:
         nums |= extra
         # 不再往描述里塞 "N个号"：回复文案会把号码逐个列出来，写个数是多余的
 
-    if not nums:
+    if not nums and not flat:
         return None
 
     return {"nums": nums, "unit": unit, "desc": " ".join(names), "flat": flat}
@@ -711,12 +749,42 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
 
         unit = got["unit"]
         if got["flat"]:
-            # 12 平特整肖、14 二中二/三中三：原文那个数就是整笔金额，号码不落盘
-            play = got["desc"] or seg.strip()
-            extras.append({"play": play, "text": seg.strip(),
-                           "amount": round(unit, 2),
-                           "nums": ",".join(str(int(n)) for n in sorted(got["nums"]))})
-            parts.append("%s 共%s" % (play, _fmt(unit)))
+            # 12/13/14：整笔金额，号码不落盘。金额口径在这里定：
+            #   平特鼠100 / 平特鼠牛100 → 原文那个数就是整笔
+            #   平特鼠牛各100           → 每肖 100，整笔 200
+            #   鼠3连肖300              → 鼠牛虎共 300（不带「各」）
+            #   鼠牛二中二100           → 整注 100
+            txt = seg.strip()
+            zs = [ch for ch in txt if ch in zodiac]
+            each = bool(re.search(r"各\s*\d", txt))
+            if re.search(r"连肖", txt):
+                kind = "lianxiao"
+                n = 2                       # 只写「连肖」不写位数，按二连
+                m_len = re.search(r"([一二两三四五六1-6])\s*连肖", txt)
+                if m_len:
+                    n = int(cn2num(m_len.group(1)) or 0) or 2
+                if zs and len(zs) < n:
+                    i = SX_ORDER.index(zs[0]) if zs[0] in SX_ORDER else 0
+                    zs = [SX_ORDER[(i + k) % 12] for k in range(n)]
+            elif re.search(r"中二|中三", txt):
+                kind = "zhong"
+            else:
+                kind = "pingte"
+            # 中二/中三是一整注，带不带「各」都按原文那个数走
+            if kind == "zhong":
+                amount = round(unit, 2)
+            else:
+                amount = round(unit * len(zs), 2) if (each and zs) else round(unit, 2)
+            play = got["desc"] or txt
+            extras.append({
+                "play": play, "text": txt, "amount": amount,
+                "nums": ",".join(str(int(n)) for n in sorted(got["nums"])),
+                "kind": kind, "zodiacs": "".join(zs), "each": each,
+            })
+            if each and zs:
+                parts.append("%s 各%s 共%s" % (play, _fmt(unit), _fmt(amount)))
+            else:
+                parts.append("%s 共%s" % (play, _fmt(amount)))
             continue
 
         for n in got["nums"]:

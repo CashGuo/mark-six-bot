@@ -2899,6 +2899,24 @@ class ManualBetDialog(tk.Toplevel):
         except Exception:
             pass
 
+    def _zx_text(self, zs, total, per):
+        """把生肖注写成客户本来会写的那句原文。
+
+        服务端按同一套 bet_rules 再解析一遍，所以这里不能自创语法：
+          平特鼠牛各50 / 平特鼠牛50 / 鼠牛2连肖100 / 鼠牛二中二100 / 鼠牛虎三中三200
+        """
+        all_sx = "".join(zs)
+        total_txt = self._amt_str(total)
+        if self.zx_mode == "zh2":
+            return "%s二中二%s" % (all_sx, total_txt)
+        if self.zx_mode == "zh3":
+            return "%s三中三%s" % (all_sx, total_txt)
+        if self.zx_mode == "lx":
+            return "%s%d连肖%s" % (all_sx, max(2, len(zs)), total_txt)
+        if self.zx_split == "each":
+            return "平特%s各%s" % (all_sx, self._amt_str(per[zs[0]]))
+        return "平特%s%s" % (all_sx, total_txt)
+
     def _zx_add(self):
         if self._busy:
             return
@@ -2914,7 +2932,8 @@ class ManualBetDialog(tk.Toplevel):
         else:
             each_txt = "整注"
         self.notes.append({
-            "zx": True, "text": "", "label": "%s %s" % (self._zx_name(), "+".join(zs)),
+            "zx": True, "flat": True, "text": self._zx_text(zs, total, per),
+            "label": "%s %s" % (self._zx_name(), "+".join(zs)),
             "nums": [], "each": (per[zs[0]] if per else total),
             "each_txt": each_txt, "total": round(total, 2),
             "zx_mode": self.zx_mode, "zodiacs": list(zs), "per": dict(per),
@@ -2923,7 +2942,7 @@ class ManualBetDialog(tk.Toplevel):
         self.v_amt.set("")
         self._zx_prev()
         self._refresh_list()
-        self._say("生肖注已进清单（记账功能还没接，先核对金额和肖）", CLR_OK)
+        self._say("生肖注已进清单，记账时单独落一笔（不进号码盘）", CLR_OK)
         self.en_amt.focus_set()
 
     def _quick_amt(self, v):
@@ -3158,11 +3177,6 @@ class ManualBetDialog(tk.Toplevel):
     def _submit(self):
         if self._busy or not self.notes:
             return
-        if any(n.get("zx") for n in self.notes):
-            # 界面先上，规则还没接：宁可拦住，也不能把这部分钱记错或漏掉
-            self._say("生肖注还没接通记账（等你确认规则后再开）。"
-                      "先把这几注删掉，或单独记号码注", CLR_BAD)
-            return
         chat = (self.v_chat.get() or "").strip()
         if not chat:
             self._say("填一下挂在谁名下")
@@ -3182,46 +3196,81 @@ class ManualBetDialog(tk.Toplevel):
         if not acc:
             self._say("没有可记的账号，先在控制台里选一个账号", CLR_BAD)
             return
-        each = [(n["text"], n["each"]) for n in self.notes]
+        # 生肖注不进号码盘，每注是一条完整原文，单独落一笔；
+        # 号码注还能拼成一句交给服务端，拼不通才逐注记。
+        flat_notes = [n for n in self.notes if n.get("zx")]
+        normal = [n for n in self.notes if not n.get("zx")]
 
         self._busy = True
+        res = None
+        fails = []
+        done_numbers = 0
+        done_total = 0.0
+        detail = []
         try:
-            joined = manual_plays.join_text(self.notes)
-            if self._verify_join(joined):
-                res = self.on_submit({"text": joined, "chat": chat,
-                                      "account": acc, "market": mk}) \
+            for n in flat_notes:
+                r = self.on_submit({"text": n["text"], "chat": chat,
+                                    "account": acc, "market": mk}) \
                     if self.on_submit else {"ok": False, "error": "没有提交入口"}
-            else:
-                # 整句拼不通就逐注记：宁可多几条流水，也不把账记错
-                fails = []
-                res = None
-                for i, (t, a) in enumerate(each):
-                    r = self.on_submit({"text": "%s各%s" % (t, self._amt_str(a)),
-                                        "chat": chat, "account": acc, "market": mk}) \
+                if not r.get("ok"):
+                    fails.append("%s：%s" % (n["label"],
+                                            r.get("error") or r.get("reason") or "失败"))
+                    continue
+                done_numbers += int(r.get("numbers") or 0)
+                done_total += float(r.get("total") or 0)
+                if r.get("detail"):
+                    detail.append(str(r.get("detail")))
+                res = res or r
+
+            if normal:
+                joined = manual_plays.join_text(normal)
+                if self._verify_join(joined):
+                    r = self.on_submit({"text": joined, "chat": chat,
+                                        "account": acc, "market": mk}) \
                         if self.on_submit else {"ok": False, "error": "没有提交入口"}
                     if not r.get("ok"):
-                        fails.append("第%d注：%s" % (i + 1, r.get("error") or r.get("reason") or "失败"))
-                    elif res is None:
-                        res = r
-                if fails:
-                    res = {"ok": False, "error": "；".join(fails)}
-                elif res is None:
-                    res = {"ok": False, "error": "没有提交入口"}
+                        fails.append("%s" % (r.get("error") or r.get("reason") or "失败"))
+                    else:
+                        done_numbers += int(r.get("numbers") or 0)
+                        done_total += float(r.get("total") or 0)
+                        if r.get("detail"):
+                            detail.append(str(r.get("detail")))
+                        res = res or r
+                else:
+                    # 整句拼不通就逐注记：宁可多几条流水，也不把账记错
+                    for i, n in enumerate(normal):
+                        r = self.on_submit(
+                            {"text": "%s各%s" % (n["text"], self._amt_str(n["each"])),
+                             "chat": chat, "account": acc, "market": mk}) \
+                            if self.on_submit else {"ok": False, "error": "没有提交入口"}
+                        if not r.get("ok"):
+                            fails.append("第%d注：%s"
+                                         % (i + 1, r.get("error")
+                                            or r.get("reason") or "失败"))
+                        else:
+                            done_numbers += int(r.get("numbers") or 0)
+                            done_total += float(r.get("total") or 0)
+                            if r.get("detail"):
+                                detail.append(str(r.get("detail")))
+                            res = res or r
         finally:
             self._busy = False
 
-        if not res or not res.get("ok"):
-            why = (res or {}).get("error") or (res or {}).get("reason") or "未知原因"
-            self._say("没记上：%s\n清单还在，改完可以再点一次记账" % why, CLR_BAD)
+        if fails:
+            self._say("没记全：%s\n已记上的部分是 %s 元；清单还在，改完可以再点一次记账"
+                      % ("；".join(fails), fmt_money(done_total)), CLR_BAD)
+            return
+        if res is None:
+            self._say("没有提交入口", CLR_BAD)
             return
 
         mkname = "香港" if (res.get("market") or mk) == "HK" else "澳门"
-        msg = "已记账（%s）：%s 个号 · 合计 %s 元" % (
-            mkname, res.get("numbers") or 0, fmt_money(res.get("total")))
+        msg = "已记账（%s）：%d 注 · %s 个号 · 合计 %s 元" % (
+            mkname, len(self.notes), done_numbers, fmt_money(done_total))
         if res.get("archived_issue"):
             msg += "；已换期，上一期 %s 归档" % res.get("archived_issue")
-        if res.get("detail"):
-            msg += "\n" + str(res.get("detail"))
+        if detail:
+            msg += "\n" + "；".join(detail)
         self._say(msg, CLR_OK)
         self.notes = []
         self._refresh_list()

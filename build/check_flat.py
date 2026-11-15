@@ -66,10 +66,10 @@ print("不计号明细：%s" % [(x.get("play"), x.get("amount"))
                          for x in (others.get("items") or [])])
 
 # 期望（2026 马年：马 5 个号，其余生肖 4 个号）
-#   号盘     = 连肖 鼠4+牛4 = 8 号各 20 → 160；鼠50 的 4 号各 50 → 200；共 360
-#   不计号   = 平特 100 + 二中二 20 → 120
-#   合计     = 480
-exp_board, exp_flat = 360.0, 120.0
+#   号盘     = 鼠50 的 4 号各 50 → 200（连肖改成整笔后不再落盘）
+#   不计号   = 平特 100 + 二连肖 鼠20+牛20=40 + 二中二 20 → 160
+#   合计     = 360
+exp_board, exp_flat = 200.0, 160.0
 good = abs(board - exp_board) < 0.01 and abs(flat - exp_flat) < 0.01
 
 print("\n=== 撤销二中的那一笔 ===")
@@ -83,9 +83,9 @@ if target:
     print("撤销 %s → ok=%s 累计 %s" % (target.get("msg_id"), d.get("ok"), d.get("grand_total")))
     others2 = load("others_state.json")
     flat2 = round(float(others2.get("total") or 0), 2)
-    # 第一条带 extras 的是「平特鼠100」，撤掉它 → 120 - 100 = 20
-    print("撤销后不计号 %s（应为 20）" % flat2)
-    good = good and abs(flat2 - 20.0) < 0.01 and d.get("ok")
+    # 第一条带 extras 的是「平特鼠100」，撤掉它 → 160 - 100 = 60
+    print("撤销后不计号 %s（应为 60）" % flat2)
+    good = good and abs(flat2 - 60.0) < 0.01 and d.get("ok")
 else:
     good = False
     print("流水里找不到带 extras 的记录")

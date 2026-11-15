@@ -405,6 +405,20 @@ function paintZx() {
   add.disabled = false;
 }
 
+/* 生肖注写成客户会写的那句原文：服务端按同一套规则再解析一遍，不能自创语法 */
+function numText(v) {
+  v = Number(v || 0);
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+function zxText(c) {
+  const all = c.zs.join("");
+  if (ZX.mode === "zh2") return all + "二中二" + numText(c.total);
+  if (ZX.mode === "zh3") return all + "三中三" + numText(c.total);
+  if (ZX.mode === "lx") return all + Math.max(2, c.zs.length) + "连肖" + numText(c.total);
+  if (ZX.split === "each") return "平特" + all + "各" + numText(c.per[c.zs[0]]);
+  return "平特" + all + numText(c.total);
+}
+
 function zxAddNote() {
   const c = zxCalc();
   if (!c.zs.length) return toast("先选生肖", "bad");
@@ -416,14 +430,14 @@ function zxAddNote() {
     ? (same ? "每肖 " + money(vals[0]) : "分摊 " + vals.map(v => money(v)).join("/"))
     : "整注";
   NOTES.push({
-    zx: true, text: "", label: zxName() + " " + c.zs.join("+"),
+    zx: true, flat: true, text: zxText(c), label: zxName() + " " + c.zs.join("+"),
     nums: [], each: (c.per ? c.per[c.zs[0]] : c.total),
     eachTxt: eachTxt, total: c.total, zodiacs: c.zs
   });
   ZX.z = new Set();
   $("amt").value = "";
   paintZx(); renderNotes();
-  toast("生肖注已进清单（记账功能还没接，先核对金额和肖）", "ok");
+  toast("生肖注已进清单，记账时单独落一笔（不进号码盘）", "ok");
 }
 
 /* ---------- 条件变了：问服务端算号（不在前端自己算） ---------- */
@@ -550,10 +564,6 @@ function renderNotes() {
 /* ---------- 记账 ---------- */
 async function submit() {
   if (!NOTES.length) return toast("清单是空的", "bad");
-  if (NOTES.some(n => n.zx)) {
-    /* 规则还没接：宁可拦住，也不能把这些钱记错或漏掉 */
-    return toast("生肖注还没接通记账（等规则确认后再开）。先把这几注删掉，或单独记号码注", "bad");
-  }
   const chat = ($("who").value || "").trim();
   if (!chat) { toast("填一下挂在谁名下", "bad"); $("who").focus(); return; }
   const total = NOTES.reduce((a, n) => a + n.total, 0);
@@ -564,7 +574,8 @@ async function submit() {
   const btn = $("okBtn");
   btn.disabled = true; btn.textContent = "记账中…";
   const r = await jpost("/api/manual/submit", {
-    notes: NOTES.map(n => ({ text: n.text, each: n.each, nums: n.nums })),
+    notes: NOTES.map(n => ({ text: n.text, each: n.each, nums: n.nums,
+                             flat: !!n.flat })),
     chat: chat, account: $("acc").value || "", market: MKT
   });
   btn.textContent = "记账";
@@ -573,7 +584,8 @@ async function submit() {
     btn.disabled = false;
     return;
   }
-  let msg = "已记账（" + (r.market_name || "") + "）：" + (r.numbers || 0) + " 个号 · 合计 " + money(r.total) + " 元";
+  let msg = "已记账（" + (r.market_name || "") + "）：" + (r.notes || 0) + " 注 · "
+    + (r.numbers || 0) + " 个号 · 合计 " + money(r.total) + " 元";
   if (r.archived_issue) msg += "；已换期，上一期 " + r.archived_issue + " 归档";
   toast(msg, "ok");
   NOTES = []; selRow = -1; renderNotes();
