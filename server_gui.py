@@ -381,6 +381,24 @@ def fmt_money(v) -> str:
     return ("%.2f" % n).rstrip("0").rstrip(".")
 
 
+def zx_amt(v) -> str:
+    """生肖格里的金额：格子只有 6 个字符宽，写千分位就会顶出格子压到隔壁。
+
+    所以这里不带千分位；上了百万再用「万/亿」缩写，避免 7 位以上溢出。
+    """
+    try:
+        n = float(v or 0)
+    except Exception:
+        return ""
+    if not n:
+        return ""
+    if n >= 1e8:
+        return ("%.2f" % (n / 1e8)).rstrip("0").rstrip(".") + "亿"
+    if n >= 1e6:
+        return ("%.0f" % (n / 1e4)) + "万"
+    return fmt_money(n)
+
+
 # ---------------- 主窗口 ----------------
 
 class MainWindow:
@@ -581,7 +599,7 @@ class MainWindow:
         # 组合注按整注记，不进生肖表：右侧竖排一列，一行一种玩法，港澳合并，有注才出现。
         # 必须先 pack 右侧再 pack 生肖区，否则 expand 的生肖区会把这一列压到几十像素。
         self.combo_wrap = tk.Frame(zbp, bg="#fbfcfd", highlightbackground="#e3e7ec",
-                                   highlightthickness=1, width=380)
+                                   highlightthickness=1, width=336)
         self.combo_wrap.pack(side="right", fill="y", padx=(0, 6), pady=(4, 4))
         self.combo_wrap.pack_propagate(False)
         # 组合注左边拉一条竖向隔线：不然中间的「合计」看着像是组合注那一栏的
@@ -612,11 +630,11 @@ class MainWindow:
                 # 金额会被 Tk 从中间截掉（只剩一个「0」），竖排后每格只要一个字宽。
                 tk.Label(f, text=z, font=("Microsoft YaHei UI", 12, "bold"),
                          bg="#fafbfc", fg=CLR_BLUE).pack()
-                amt = tk.Label(f, text="", font=("Consolas", 12, "bold"), width=5,
+                amt = tk.Label(f, text="", font=("Consolas", 11, "bold"), width=6,
                                bg="#fafbfc", fg=CLR_RED)
                 amt.pack()
                 self._zx_cells[mk].append(amt)
-            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 11, "bold"),
+            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 10, "bold"),
                          bg=CLR_BG, fg="#111827", anchor="w")
             t.pack(side="left", padx=(8, 0))
             self._zx_total[mk] = t
@@ -788,13 +806,13 @@ class MainWindow:
             rows = b.get("rows") or []
             for i, al in enumerate(self._zx_cells.get(mk) or []):
                 amt = float(rows[i].get("amount") or 0) if i < len(rows) else 0.0
-                al.configure(text=fmt_money(amt) if amt else "",
+                al.configure(text=zx_amt(amt),
                              fg=CLR_RED if amt else CLR_GREY)
             t = self._zx_total.get(mk)
             if t is not None:
                 # 这里只算生肖表（平特 + 连肖）；组合注在下面单独一行，不并进来
                 board_tot = float((b.get("totals") or {}).get("board") or 0)
-                t.configure(text="合计 %s" % fmt_money(board_tot))
+                t.configure(text="合计 %s" % (zx_amt(board_tot) or "0"))
 
         # 组合注：一行一种玩法（同类同生肖合并），港澳合并，有注才出现
         self._render_combo(boards)
