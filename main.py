@@ -1468,7 +1468,8 @@ def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
     zodiac_mapping = current_zodiac_mapping()
 
     # 先用纯规则解析：能算的绝不花模型额度和那几百毫秒。
-    # 规则算不了才退回模型；12/13/14 这类模型也认不出来，直接判失败，别白花钱。
+    # 规则算不了的才退回模型（模型现在也认 12/13/14 整笔玩法）；
+    # 判死项（中特/特肖、鼠5尾、平特写号码、组合注带各/肖数不符、没数字）不送模型。
     local = bet_rules.parse_local(text, zodiac_mapping)
     # 香港/澳门两本账：含 香/港/巷 算香港，没标的算澳门（文档第 15 条）
     forced = (market or "").strip().upper()
@@ -1525,7 +1526,7 @@ def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
     rec_id = "%s#%d" % (msg_id, int(time.time() * 1000))
 
     # 一条消息里港、澳都写了（客户说正常不会这么报，但要求支持）：按段各落一笔账。
-    # 撤销时也是各段各撤各的，不会把香港的钱扣到澳门去。
+    # 撤销时一次撤掉这条消息的所有段，每段扣各自的盘，不会把香港的钱扣到澳门去。
     parcels = list(local.get("parcels") or [])
     if local["ok"] and len(parcels) > 1 and forced not in ("HK", "MO"):
         segs: List[dict] = [{

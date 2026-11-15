@@ -786,9 +786,9 @@ def parse_local(text: str, zodiac: Dict[str, List[str]]) -> dict:
                % (_ZHONG_WORDS, _sx_alt), r"\1\2各", t)
 
     if _UNSUPPORTED.search(t):
-        # fatal：12/13/14 只有占位、没有实现，送模型也只会瞎猜 —— 直接判死
+        # 中特 / 特肖客户拍板不解析（12/13/14 里只剩这两个没做），送模型也只会瞎猜 —— 直接判死
         return {"ok": False, "fatal": True,
-                "reason": "暂不支持的玩法（平特/连肖/中特）",
+                "reason": "暂不支持的玩法（中特/特肖）",
                 "bets": {}, "items": [], "detail": "", "market": detect_market(t)}
 
     # 第 0 层：一个数字都没有 —— 寒暄、表情、图片占位、指令，不可能是下注。
