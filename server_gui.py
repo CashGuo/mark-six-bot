@@ -2372,14 +2372,24 @@ class ManualBetDialog(tk.Toplevel):
         rcard.grid_rowconfigure(1, weight=1)
         rcard.grid_columnconfigure(0, weight=1)
 
+        # 说明行右边挂一个跳转：右栏内容比可视区高，生肖注在下面 500px 处，
+        # 不点这一下很多人以为没有这块（实际有，要滚下去）。
+        rulebar = tk.Frame(rcard, bg=CLR_CARD)
+        rulebar.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 2))
         self.lb_rule = tk.Label(
-            rcard,
+            rulebar,
             text="生肖多选＝并集（牛+马 共 9 个号）｜玩法多选＝交集（大+单 共 13 个号）"
                  "｜生肖和玩法一起选，两边再取交集",
             font=self._font("tiny"), bg=CLR_CARD, fg="#6b7280",
-            justify="left", anchor="w", wraplength=440)
-        self.lb_rule.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 2))
+            justify="left", anchor="w", wraplength=352)
+        self.lb_rule.pack(side="left", fill="x", expand=True)
         self._fw.append((self.lb_rule, "tiny"))
+        zjump = tk.Label(rulebar, text="生肖注 ↓", font=self._font("tiny"),
+                         bg="#dbeafe", fg="#1e40af", padx=6, pady=2,
+                         cursor="hand2")
+        zjump.pack(side="right", padx=(6, 0), anchor="n")
+        zjump.bind("<Button-1>", lambda e: self._jump_zx())
+        self._fw.append((zjump, "tiny"))
 
         mid = tk.Frame(rcard, bg=CLR_CARD)
         mid.grid(row=1, column=0, sticky="nsew")
@@ -2659,6 +2669,19 @@ class ManualBetDialog(tk.Toplevel):
         self._repaint()
 
     # ---------- 生肖注（平特 / 连肖 / 二中二 / 三中三） ----------
+    def _jump_zx(self):
+        """滚到生肖注面板。右栏内容比可视区高，它埋在下面 500px 处。"""
+        try:
+            self.update_idletasks()
+            sr = str(self.canvas.cget("scrollregion") or "").split()
+            total = float(sr[3]) if len(sr) == 4 else 0.0
+            if total <= 1:
+                return
+            y = self._zx_mode_lb["pt"].winfo_rooty() - self.ops.winfo_rooty() - 14
+            self.canvas.yview_moveto(max(0.0, min(total, float(y))) / total)
+        except Exception:
+            pass
+
     def _pick_zx_mode(self, k):
         self.zx_mode = k
         if k == "lx":
