@@ -581,43 +581,45 @@ class MainWindow:
         # 组合注按整注记，不进生肖表：右侧竖排一列，一行一种玩法，港澳合并，有注才出现。
         # 必须先 pack 右侧再 pack 生肖区，否则 expand 的生肖区会把这一列压到几十像素。
         self.combo_wrap = tk.Frame(zbp, bg="#fbfcfd", highlightbackground="#e3e7ec",
-                                   highlightthickness=1, width=420)
-        self.combo_wrap.pack(side="right", fill="y", padx=(2, 6), pady=(4, 4))
+                                   highlightthickness=1, width=380)
+        self.combo_wrap.pack(side="right", fill="y", padx=(0, 6), pady=(4, 4))
         self.combo_wrap.pack_propagate(False)
+        # 组合注左边拉一条竖向隔线：不然中间的「合计」看着像是组合注那一栏的
+        tk.Frame(zbp, bg="#b7c0ca", width=2).pack(side="right", fill="y",
+                                                 pady=(8, 8), padx=(4, 0))
         self.combo_box = tk.Frame(self.combo_wrap, bg="#fbfcfd")
         self.combo_box.pack(fill="both", expand=True, padx=8, pady=4)
         zin = tk.Frame(zbp, bg=CLR_BG)
         zin.pack(side="left", fill="both", expand=True, padx=(6, 2), pady=(4, 2))
         self._zx_cells = {}
         self._zx_total = {}
-        # 上下各垫一块会伸缩的空白，让澳门/香港两行垂直居中，不在顶部堆成一坨
-        tk.Frame(zin, bg=CLR_BG).pack(fill="both", expand=True)
         for mk, name in (("MO", "澳门"), ("HK", "香港")):
             rf = tk.Frame(zin, bg=CLR_BG)
-            rf.pack(fill="x", pady=2)
+            rf.pack(fill="x", pady=3)
             tk.Label(rf, text=name, font=("Microsoft YaHei UI", 12, "bold"),
                      bg=CLR_BG, fg="#374151", width=4, anchor="w").pack(side="left")
-            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 11, "bold"),
-                         bg=CLR_BG, fg="#111827", width=13, anchor="e")
-            t.pack(side="right", padx=(4, 0))
-            self._zx_total[mk] = t
             cw = tk.Frame(rf, bg=CLR_BG)
-            cw.pack(side="left", fill="x", expand=True)
+            # 不 expand：12 格按内容排完，合计就紧接在后面，不会被甩到最右边
+            cw.pack(side="left")
             for c in range(12):
-                cw.grid_columnconfigure(c, weight=1, uniform="zxc")
+                cw.grid_columnconfigure(c, weight=0, uniform="zxc")
             self._zx_cells[mk] = []
             for c, z in enumerate(msb_view.ZODIAC_ANIMALS):
                 f = tk.Frame(cw, bg="#fafbfc", highlightbackground="#e3e7ec",
                              highlightthickness=1)
-                f.grid(row=0, column=c, sticky="nsew", padx=1)
-                # 生肖字放大加粗上色：12 格横排时一眼就能扫到哪几个肖有量
-                tk.Label(f, text=z, font=("Microsoft YaHei UI", 13, "bold"),
-                         bg="#fafbfc", fg=CLR_BLUE).pack(side="left", padx=(4, 2))
-                amt = tk.Label(f, text="", font=("Consolas", 13, "bold"),
+                f.grid(row=0, column=c, sticky="ew", padx=1)
+                # 格子里竖排：生肖字在上、金额在下。横着并排 12 格时宽度根本不够，
+                # 金额会被 Tk 从中间截掉（只剩一个「0」），竖排后每格只要一个字宽。
+                tk.Label(f, text=z, font=("Microsoft YaHei UI", 12, "bold"),
+                         bg="#fafbfc", fg=CLR_BLUE).pack()
+                amt = tk.Label(f, text="", font=("Consolas", 12, "bold"), width=5,
                                bg="#fafbfc", fg=CLR_RED)
-                amt.pack(side="left", padx=(0, 3))
+                amt.pack()
                 self._zx_cells[mk].append(amt)
-        tk.Frame(zin, bg=CLR_BG).pack(fill="both", expand=True)
+            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 11, "bold"),
+                         bg=CLR_BG, fg="#111827", anchor="w")
+            t.pack(side="left", padx=(8, 0))
+            self._zx_total[mk] = t
         # 左下：最近记账，接在「平特」下面一直到底
         bp = tk.LabelFrame(left, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
                            fg="#111827", bd=1, relief="groove")
@@ -629,7 +631,7 @@ class MainWindow:
         # 不让 grid 子控件把 left 的请求尺寸顶大 —— 否则两个号码盘会把右边排序栏挤掉
         left.grid_propagate(False)
         left.grid_rowconfigure(0, weight=1)
-        left.grid_rowconfigure(1, weight=0, minsize=200)
+        left.grid_rowconfigure(1, weight=0, minsize=186)
         left.grid_rowconfigure(2, weight=0, minsize=250)
         garea.grid(row=0, column=0, sticky="nsew")
         zbp.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
@@ -829,7 +831,7 @@ class MainWindow:
                      font=("Microsoft YaHei UI", 9, "bold")
                      ).grid(row=i, column=0, sticky="w", pady=0)
             tk.Label(self.combo_box, text="+".join(g["zodiacs"]) or "—", bg=CLR_BG,
-                     fg="#111827", wraplength=230, justify="left", anchor="w",
+                     fg="#111827", wraplength=190, justify="left", anchor="w",
                      font=("Microsoft YaHei UI", 9, "bold")
                      ).grid(row=i, column=1, sticky="w", padx=(6, 6), pady=0)
             tk.Label(self.combo_box, text="共%s元" % fmt_money(g["amount"]), bg=CLR_BG,
