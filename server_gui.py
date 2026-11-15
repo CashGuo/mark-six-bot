@@ -612,7 +612,7 @@ class MainWindow:
         self.lb_rec_hint.pack(side="left")
 
         # 撤销做成表格最后一列的「点一下」单元格：Tk 的 Treeview 放不了行内按钮。
-        cols = ("ts", "issue", "chat", "who", "text", "nums", "amt", "grand", "op")
+        cols = ("ts", "issue", "chat", "who", "text", "nums", "amt", "op")
         self._rec_op_col = "#%d" % len(cols)
         box = tk.Frame(bp, bg=CLR_BG)
         box.pack(fill="both", expand=True, padx=6, pady=(2, 6))
@@ -625,7 +625,7 @@ class MainWindow:
                            ("chat", "会话", 118, "w"),
                            ("who", "发送人", 86, "w"), ("text", "原文", 300, "w"),
                            ("nums", "号码", 56, "e"), ("amt", "本单", 74, "e"),
-                           ("grand", "累计", 76, "e"), ("op", "操作", 60, "center")):
+                           ("op", "操作", 60, "center")):
             self.tv_rec.heading(c, text=t)
             self.tv_rec.column(c, width=w, anchor=a)
         self.tv_rec.pack(side="left", fill="both", expand=True)
@@ -1550,7 +1550,7 @@ class MainWindow:
                                    str(x.get("chat") or x.get("chat_name") or ""),
                                    str(x.get("sender_name") or x.get("sender") or ""),
                                    str(x.get("text") or ""), x.get("numbers") or 0,
-                                   x.get("total") or 0, x.get("grand_total") or 0,
+                                   x.get("total") or 0,
                                    bool(x.get("reversed")))
                                   for x in rec_rows))
         if rec_sig != self._rec_sig:
@@ -1569,7 +1569,6 @@ class MainWindow:
                     str(x.get("text") or "")[:70],
                     x.get("numbers") or 0,
                     fmt_money(x.get("total")),
-                    fmt_money(x.get("grand_total")),
                     "已撤销" if rev else "撤销",
                 ), tags=("who",) if not rev else ("who", "rev"))
                 self._rec_mid[iid] = str(x.get("msg_id") or "")
