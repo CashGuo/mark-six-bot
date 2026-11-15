@@ -645,8 +645,8 @@ class MainWindow:
                                bg="#fafbfc", fg=CLR_RED)
                 amt.pack()
                 self._zx_cells[mk].append(amt)
-            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 10, "bold"),
-                         bg=CLR_BG, fg="#111827", anchor="w")
+            t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 14, "bold"),
+                         bg=CLR_BG, fg=CLR_RED, anchor="w")
             t.pack(side="left", padx=(8, 0))
             self._zx_total[mk] = t
         # 左下：最近记账，接在「平特」下面一直到底
