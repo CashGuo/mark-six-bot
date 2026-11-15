@@ -553,7 +553,7 @@ class MainWindow:
         # 权重再小也压不下来（实测给 6:7 也还是 55%）。
         # 左上：澳门、香港两个号码盘，左澳右港同时显示
         garea = tk.Frame(left, bg=CLR_BG)
-        garea.place(x=0, y=0, relwidth=1.0, relheight=0.29)
+        garea.place(x=0, y=0, relwidth=1.0, relheight=0.25)
         for mk, title in (("MO", " 澳门 号码盘 "), ("HK", " 香港 号码盘 ")):
             gp = tk.LabelFrame(garea, text=title, font=FONT_B, bg=CLR_BG,
                                fg="#111827", bd=1, relief="groove")
@@ -568,9 +568,17 @@ class MainWindow:
                             text=" 生肖金额（平特 + 连肖合并一列）· 组合注（中二～中六 · 港澳合并） ",
                             font=("Microsoft YaHei UI", 12, "bold"), bg=CLR_BG,
                             fg="#111827", bd=1, relief="groove")
-        zbp.place(x=0, rely=0.29, relwidth=1.0, relheight=0.24)
+        zbp.place(x=0, rely=0.25, relwidth=1.0, relheight=0.33)
+        # 组合注按整注记，不进生肖表：右侧竖排一列，一行一种玩法，港澳合并，有注才出现。
+        # 必须先 pack 右侧再 pack 生肖区，否则 expand 的生肖区会把这一列压到几十像素。
+        self.combo_wrap = tk.Frame(zbp, bg="#fbfcfd", highlightbackground="#e3e7ec",
+                                   highlightthickness=1, width=420)
+        self.combo_wrap.pack(side="right", fill="y", padx=(2, 6), pady=(4, 4))
+        self.combo_wrap.pack_propagate(False)
+        self.combo_box = tk.Frame(self.combo_wrap, bg="#fbfcfd")
+        self.combo_box.pack(fill="both", expand=True, padx=8, pady=4)
         zin = tk.Frame(zbp, bg=CLR_BG)
-        zin.pack(fill="both", expand=True, padx=6, pady=(4, 2))
+        zin.pack(side="left", fill="both", expand=True, padx=(6, 2), pady=(4, 2))
         self._zx_cells = {}
         self._zx_total = {}
         for mk, name in (("MO", "澳门"), ("HK", "香港")):
@@ -598,14 +606,10 @@ class MainWindow:
                                bg="#fafbfc", fg=CLR_RED)
                 amt.pack(side="left", padx=(0, 3))
                 self._zx_cells[mk].append(amt)
-        # 组合注按整注记，不进生肖表：一行一种玩法，港澳合并，有注才出现
-        self.combo_box = tk.Frame(zbp, bg=CLR_BG)
-        self.combo_box.pack(fill="x", padx=8, pady=(2, 4))
-
         # 左下：最近记账，钉在底部，高度占 51%，宽度就到排序区起点
         bp = tk.LabelFrame(left, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
                            fg="#111827", bd=1, relief="groove")
-        bp.place(x=0, rely=1.0, anchor="sw", relwidth=1.0, relheight=0.47)
+        bp.place(x=0, rely=1.0, anchor="sw", relwidth=1.0, relheight=0.42)
 
         # 过滤条：按期看。选项是具体三个期（本期 / 前一期 / 前二期），
         # 不是「最近 N 期」这种含糊说法 —— 选中哪一期就只显示那一期。
@@ -782,7 +786,8 @@ class MainWindow:
                 a["amount"] = round(a["amount"] + float(g.get("amount") or 0), 2)
         if not agg:
             tk.Label(self.combo_box, text="组合注：本期没有", bg=CLR_BG,
-                     fg=CLR_MUTED, font=("Microsoft YaHei UI", 11)).pack(anchor="w")
+                     fg=CLR_MUTED, font=("Microsoft YaHei UI", 10)).grid(
+                         row=0, column=0, sticky="w")
             return
         rank = {"二": 2, "三": 3, "四": 4, "五": 5, "六": 6}
         rows = sorted(agg.values(), key=lambda g: (
@@ -790,22 +795,24 @@ class MainWindow:
             [msb_view.ZODIAC_ANIMALS.index(z)
              if z in msb_view.ZODIAC_ANIMALS else 99 for z in g["zodiacs"]]))
         total = 0.0
-        for g in rows:
-            line = tk.Frame(self.combo_box, bg=CLR_BG)
-            line.pack(fill="x", anchor="w")
-            tk.Label(line, text="%s ：" % g["label"], bg=CLR_BG,
+        self.combo_box.grid_columnconfigure(1, weight=1)
+        for i, g in enumerate(rows):
+            tk.Label(self.combo_box, text=g["label"], bg=CLR_BG, anchor="w",
                      fg=ZHONG_CLR.get(g["label"][0], CLR_BLUE),
-                     font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
-            tk.Label(line, text="+".join(g["zodiacs"]) or "—", bg=CLR_BG,
-                     fg="#111827",
-                     font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
-            tk.Label(line, text="共 %s 元" % fmt_money(g["amount"]), bg=CLR_BG,
-                     fg=CLR_RED,
-                     font=("Consolas", 13, "bold")).pack(side="left", padx=(10, 0))
+                     font=("Microsoft YaHei UI", 10, "bold")
+                     ).grid(row=i, column=0, sticky="w", pady=0)
+            tk.Label(self.combo_box, text="+".join(g["zodiacs"]) or "—", bg=CLR_BG,
+                     fg="#111827", wraplength=230, justify="left", anchor="w",
+                     font=("Microsoft YaHei UI", 10, "bold")
+                     ).grid(row=i, column=1, sticky="w", padx=(6, 6), pady=0)
+            tk.Label(self.combo_box, text="共%s元" % fmt_money(g["amount"]), bg=CLR_BG,
+                     fg=CLR_RED, font=("Consolas", 10, "bold")
+                     ).grid(row=i, column=2, sticky="e", pady=0)
             total = round(total + g["amount"], 2)
         tk.Label(self.combo_box, text="合计：%s 元" % fmt_money(total), bg=CLR_BG,
-                 fg="#111827", font=("Microsoft YaHei UI", 12, "bold")).pack(
-                     anchor="w", pady=(2, 0))
+                 fg="#111827", font=("Microsoft YaHei UI", 10, "bold")
+                 ).grid(row=len(rows), column=0, columnspan=3, sticky="w",
+                        pady=(4, 0))
 
     def _rescale_grid(self, market):
         """按格子实际高度重算号码盘字号。
