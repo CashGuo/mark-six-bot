@@ -1381,15 +1381,31 @@ class MainWindow:
             return False
 
         ap = j.get("applied") or {}
-        items = "、".join("%s ¥%s" % (k, fmt_money(v)) for k, v in sorted(ap.items()))
+        segs = j.get("segments") or []
         total = j.get("total")
-        body = ("原文：%s\n\n"
-                "当时记账：%s\n"
-                "合计：¥%s\n\n"
-                "撤销只把这 %d 个号各减回去，别的账一分不动。\n"
-                "账本总额会减 ¥%s。\n\n确定撤销吗？"
-                % (j.get("text") or "", items, fmt_money(total),
-                   len(ap), fmt_money(total)))
+        if len(segs) > 1:
+            # 分盘消息：一条消息落了两笔，撤销时一起撤，得把每个盘都说清楚
+            lines = []
+            for s in segs:
+                mkt = "香港" if s.get("market") == "HK" else "澳门"
+                det = "、".join("%s ¥%s" % (k, fmt_money(v))
+                                for k, v in sorted((s.get("applied") or {}).items()))
+                lines.append("%s：%s%s¥%s"
+                             % (mkt, det, "　" if det else "", fmt_money(s.get("total"))))
+            body = ("原文：%s\n\n"
+                    "这条消息落了两笔账（港、澳分开记）：\n%s\n\n"
+                    "合计：¥%s\n\n"
+                    "撤销会把这两笔一起撤掉，每个月各自的盘扣回，别的账一分不动。\n\n"
+                    "确定撤销吗？" % (j.get("text") or "", "\n".join(lines), fmt_money(total)))
+        else:
+            items = "、".join("%s ¥%s" % (k, fmt_money(v)) for k, v in sorted(ap.items()))
+            body = ("原文：%s\n\n"
+                    "当时记账：%s\n"
+                    "合计：¥%s\n\n"
+                    "撤销只把这 %d 个号各减回去，别的账一分不动。\n"
+                    "账本总额会减 ¥%s。\n\n确定撤销吗？"
+                    % (j.get("text") or "", items or "（整笔，不进号码盘）",
+                       fmt_money(total), len(ap), fmt_money(total)))
         if not messagebox.askyesno("撤销这笔账", body, parent=self.root):
             return False
 

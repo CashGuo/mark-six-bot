@@ -1739,94 +1739,130 @@ def is_reversed(msg_id: str) -> bool:
 
 
 def reverse_record(msg_id: str, note: str = "") -> dict:
-    """撤销一笔。逐号减回去，追加一条冲正记录，放开消息号和指纹。"""
+    """撤销一条消息。逐号减回去，追加冲正记录，放开消息号和指纹。
+
+    一条消息可能落多笔账（例如「港 平特鼠100 澳 平特牛100」按词分盘各落一笔），
+    所以这里一次把这条消息下**所有还没撤的记录**都撤掉，每段减各自的盘；
+    只要有一段不满足撤销条件（旧账没存明细、跨期）就整条拒绝，不留半截残账。
+    """
     msg_id = (msg_id or "").strip()
     if not msg_id:
         return {"ok": False, "error": "缺 msg_id"}
-    if not find_records_by_msg(msg_id):
+    cands = find_records_by_msg(msg_id)
+    if not cands:
         return {"ok": False, "error": "流水里找不到这笔账（可能已经清理掉了）"}
-    rec = find_record(msg_id)
-    if not rec:
+
+    revd = _reversed_ids()
+    todo = [r for r in cands if _rec_id(r) not in revd]
+    if not todo:
         return {"ok": False, "error": "这笔已经撤销过了，不能撤两次"}
 
-    applied = rec.get("applied")
-    if not isinstance(applied, dict):
-        applied = {}
-    extras = rec.get("extras") or []
-    if not applied and not extras:
-        return {"ok": False,
-                "error": "这笔是旧版本记的账，没存号码明细，不敢猜着减。请手工改 numbers_state.json"}
+    # 先把每一段都校验一遍：任何一段不合格就整条不动
+    plan = []
+    acc0 = ""
+    for rec in todo:
+        applied = rec.get("applied")
+        if not isinstance(applied, dict):
+            applied = {}
+        extras = rec.get("extras") or []
+        if not applied and not extras:
+            return {"ok": False,
+                    "error": "这笔是旧版本记的账，没存号码明细，不敢猜着减。请手工改 numbers_state.json"}
+        acc = resolve_account(str(rec.get("account") or ""))
+        if acc0 and acc != acc0:
+            return {"ok": False, "error": "这条消息的几笔不在同一个账号下，不敢一起撤"}
+        acc0 = acc
+        market = str(rec.get("market") or "MO")
+        if market not in ("HK", "MO"):
+            market = "MO"
+        # 只撤本期的账。上一期已经归档结算，改它会让归档和流水对不上；
+        # 数据已经在 issues/<期号>.json 里定版，要改就手工改那一份。
+        cur = current_issue(acc)
+        rec_issue = str(rec.get("issue") or "")
+        if rec_issue and rec_issue != cur:
+            return {"ok": False,
+                    "error": f"这笔是 {rec_issue} 那期的账，本期是 {cur}。上期已结算归档，不能撤在本期"}
+        plan.append((acc, market, rec, applied, extras))
 
-    acc = resolve_account(str(rec.get("account") or ""))
-    market = str(rec.get("market") or "MO")
-    if market not in ("HK", "MO"):
-        market = "MO"
-
-    # 只撤本期的账。上一期已经归档结算，改它会让归档和流水对不上；
-    # 数据已经在 issues/<期号>.json 里定版，要改就手工改那一份。
-    cur = current_issue(acc)
-    rec_issue = str(rec.get("issue") or "")
-    if rec_issue and rec_issue != cur:
-        return {"ok": False,
-                "error": f"这笔是 {rec_issue} 那期的账，本期是 {cur}。上期已结算归档，不能撤在本期"}
-
+    segs = []
+    grand_total = 0.0
     with DATA_LOCK:
-        data = load_data(acc, market)
-        done = {}
-        for num, amt in applied.items():
-            key = str(num)
-            if key not in data:
-                continue
-            try:
-                data[key] = round(float(data[key]) - float(amt), 2)
-            except Exception:
-                continue
-            done[key] = round(-float(amt), 2)
-        save_data(data, acc, market)
-        # 不计号的那部分（平特整肖、二中二…）按 rec_id 从 others 里摘掉
-        cut = 0.0
-        if extras:
-            od = load_others(acc, market)
-            keep = []
-            for it in (od.get("items") or []):
-                if str(it.get("rec_id") or "") == _rec_id(rec):
-                    cut = round(cut + float(it.get("amount") or 0), 2)
-                else:
-                    keep.append(it)
-            od["items"] = keep
-            od["total"] = round(float(od.get("total") or 0) - cut, 2)
-            save_others(od, acc, market)
-        grand_total = market_totals(acc)["ALL"]["total"]
+        # 后落的先撤，撤完账本状态和"逐条手撤"完全一致
+        for acc, market, rec, applied, extras in reversed(plan):
+            data = load_data(acc, market)
+            done = {}
+            for num, amt in applied.items():
+                key = str(num)
+                if key not in data:
+                    continue
+                try:
+                    data[key] = round(float(data[key]) - float(amt), 2)
+                except Exception:
+                    continue
+                done[key] = round(-float(amt), 2)
+            save_data(data, acc, market)
+            # 不计号的那部分（平特整肖、二中二…）按 rec_id 从 others 里摘掉
+            cut = 0.0
+            if extras:
+                od = load_others(acc, market)
+                keep = []
+                for it in (od.get("items") or []):
+                    if str(it.get("rec_id") or "") == _rec_id(rec):
+                        cut = round(cut + float(it.get("amount") or 0), 2)
+                    else:
+                        keep.append(it)
+                od["items"] = keep
+                od["total"] = round(float(od.get("total") or 0) - cut, 2)
+                save_others(od, acc, market)
+            grand_total = market_totals(acc)["ALL"]["total"]
 
-    rev = {
-        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "type": "reversal",
-        "reversal_of": _rec_id(rec),          # 认记录，不认消息号
-        "origin_msg_id": msg_id,
-        "msg_id": "reversal-%s-%d" % (msg_id, int(time.time())),
-        "account": acc,
-        "chat": rec.get("chat") or "",
-        "sender": rec.get("sender") or "",
-        "sender_name": rec.get("sender_name") or "",
-        "text": rec.get("text") or "",
-        "market": market,
-        "numbers": len(done),
-        "total": round(sum(done.values()) - cut, 2),
-        "applied": done,
-        "extras": extras, "extra_total": round(-cut, 2),
-        "issue": rec.get("issue") or issue_of(),
-        "grand_total": grand_total,
-        "note": note,
-    }
-    _append_record(rev, account=acc)
+            rev = {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "type": "reversal",
+                "reversal_of": _rec_id(rec),          # 认记录，不认消息号
+                "origin_msg_id": msg_id,
+                # 一条消息可能同时撤好几段，秒级时间戳会撞号，用毫秒 + 段序号
+                "msg_id": "reversal-%s-%d-%d" % (msg_id, int(time.time() * 1000), len(segs) + 1),
+                "account": acc,
+                "chat": rec.get("chat") or "",
+                "sender": rec.get("sender") or "",
+                "sender_name": rec.get("sender_name") or "",
+                "text": rec.get("text") or "",
+                "market": market,
+                "numbers": len(done),
+                "total": round(sum(done.values()) - cut, 2),
+                "applied": done,
+                "extras": extras, "extra_total": round(-cut, 2),
+                "issue": rec.get("issue") or issue_of(),
+                "grand_total": grand_total,
+                "note": note,
+            }
+            _append_record(rev, account=acc)
+            segs.insert(0, {"market": market, "numbers": len(done),
+                            "total": rev["total"], "rec_id": _rec_id(rec),
+                            "applied": done, "text": rev["text"]})
+            logger.warning(f"[撤销] {acc} {msg_id} 原文={rev['text']} 盘={market} "
+                           f"减={rev['total']} {len(done)}个号 备注={note or '-'}")
 
     # 放开消息号和指纹：客户说「记错了重发一遍」时，重推才能重新入账
     unmark_message_processed(msg_id)
-    unmark_fingerprint(str(rec.get("fp") or ""))
-    logger.warning(f"[撤销] {acc} {msg_id} 原文={rec.get('text')} "
-                   f"减={rev['total']} {len(done)}个号 备注={note or '-'}")
-    return {"ok": True, "msg_id": msg_id, "account": acc, "text": rec.get("text") or "",
-            "applied": done, "total": rev["total"], "grand_total": grand_total}
+    for rec in todo:
+        unmark_fingerprint(str(rec.get("fp") or ""))
+
+    total = round(sum(s["total"] for s in segs), 2)
+    res = {"ok": True, "msg_id": msg_id, "account": acc0,
+           "text": segs[0]["text"] if segs else "", "total": total,
+           "grand_total": grand_total, "count": len(segs)}
+    if len(segs) == 1:
+        res["market"] = segs[0]["market"]
+        res["applied"] = segs[0]["applied"]
+        res["numbers"] = segs[0]["numbers"]
+    else:
+        res["segments"] = [{k: s[k] for k in ("market", "numbers", "total", "rec_id")}
+                           for s in segs]
+        logger.warning(f"[撤销] {acc0} {msg_id} 一条消息共 {len(segs)} 笔 合计={total} "
+                       f"累计={grand_total}")
+    return res
 
 
 _reversed_cache: Dict[str, object] = {"key": None, "val": set()}
@@ -3015,6 +3051,8 @@ def api_quick_bet():
     if not text:
         return jsonify({"ok": False, "error": "空文本"})
     acc = resolve_account(j.get("account") or "")
+    # msg_id 用毫秒，别用秒：撤销是"按消息号一次撤掉整条"，同一秒两条手工账
+    # 会被当成同一条消息，撤销时一起被撤掉
     r = record_bet(text,
                    "manual-%d" % int(time.time() * 1000),
                    chat_name=str(j.get("chat") or "手工记账"),
@@ -3035,6 +3073,22 @@ def api_record():
     rec = latest_record(msg_id)
     if not rec:
         return jsonify({"ok": False, "error": "找不到这笔账"}), 404
+
+    # 一条消息可能落多笔（「港 … 澳 …」按词分盘），撤销时是一起撤的，
+    # 所以这里把还没撤的每一段都摆出来，界面才好说到底要减哪几个盘。
+    revd = _reversed_ids()
+    alive = [r for r in find_records_by_msg(msg_id) if _rec_id(r) not in revd]
+    segs = [{"market": str(r.get("market") or "MO"),
+             "numbers": r.get("numbers"),
+             "total": r.get("total"),
+             "applied": r.get("applied") or None,
+             "extras": len(r.get("extras") or []),
+             "rec_id": _rec_id(r)} for r in alive]
+    seg_total = round(sum(float(s.get("total") or 0) for s in segs), 2) if segs else rec.get("total")
+    has_detail = bool(segs) and all(
+        (isinstance(s.get("applied"), dict) and bool(s.get("applied"))) or s.get("extras")
+        for s in segs)
+
     return jsonify({
         "ok": True,
         "msg_id": msg_id,
@@ -3043,9 +3097,11 @@ def api_record():
         "chat": rec.get("chat") or "",
         "sender": rec.get("sender_name") or rec.get("sender") or "",
         "text": rec.get("text") or "",
-        "total": rec.get("total"),
-        "applied": rec.get("applied") or None,
-        "has_detail": bool(isinstance(rec.get("applied"), dict) and rec.get("applied")),
+        "total": seg_total,
+        "applied": (segs[0]["applied"] if len(segs) == 1 else (rec.get("applied") or None)),
+        "has_detail": has_detail,
+        "segments": segs,
+        "count": len(segs),
         "reversed": is_reversed(msg_id),
         "issue": rec.get("issue") or "",
     })
