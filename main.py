@@ -317,10 +317,15 @@ def all_accounts() -> List[str]:
 
     不看 targets/*.json —— 只有一份空的下发配置不算"这个号接入过"，
     否则界面上会冒出一个幽灵账号。
+
+    港澳两本账都要看：只记过香港单的账号，澳门账本可能整个不存在，
+    只看 numbers_state.json 会把这个账号从列表里漏掉（流水也就找不到了）。
     """
     out = set()
-    for p in STATE_DIR.glob("*/numbers_state.json"):
-        out.add(p.parent.name)
+    for pat in ("*/numbers_state.json", "*/numbers_state_hk.json",
+                "*/others_state.json", "*/others_state_hk.json"):
+        for p in STATE_DIR.glob(pat):
+            out.add(p.parent.name)
     for p in CONTACTS_DIR.glob("*.json"):
         out.add(p.stem)
     return sorted(out)
@@ -1364,12 +1369,15 @@ def issue_summary(account=None, limit: int = 60) -> Dict[str, object]:
 
 def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
                sender_name: str = "", account: str = "",
-               fp: str = "", chat_id: str = "", create_time=None) -> dict:
+               fp: str = "", chat_id: str = "", create_time=None,
+               market: str = "") -> dict:
     """一单：解析 → 累加 → 落盘。返回结果 dict（供接口/日志用）。
 
     account 决定落到哪个账号的账本；空则落 DEFAULT_ACCOUNT。
     fp / chat_id / create_time 只为了以后能撤销这一笔：撤销要把消息号和
     内容指纹都放出来，不存下来就找不回去。
+    market 是盘口覆盖：控制台手工记账已经用「澳门/香港」开关明确选了，
+    就按它落账，不再看文本里有没有「港」；留空仍按文本判（微信推送走这条）。
     """
     text = (text or "").strip()
     if not text:
@@ -1382,7 +1390,11 @@ def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
     # 规则算不了才退回模型；12/13/14 这类模型也认不出来，直接判失败，别白花钱。
     local = bet_rules.parse_local(text, zodiac_mapping)
     # 香港/澳门两本账：含 香/港/巷 算香港，没标的算澳门（文档第 15 条）
-    market = local.get("market") or bet_rules.detect_market(text)
+    forced = (market or "").strip().upper()
+    if forced in ("HK", "MO"):
+        market = forced
+    else:
+        market = local.get("market") or bet_rules.detect_market(text)
     if market not in ("HK", "MO"):
         market = "MO"
     detail = ""
@@ -2680,7 +2692,8 @@ def api_quick_bet():
                    chat_name=str(j.get("chat") or "手工记账"),
                    sender="manual",
                    sender_name=str(j.get("sender") or "本人"),
-                   account=acc)
+                   account=acc,
+                   market=str(j.get("market") or ""))
     r["account"] = acc
     return jsonify(r)
 

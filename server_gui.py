@@ -31,6 +31,9 @@ from tkinter import messagebox, ttk
 
 import msb_view
 import msb_paths as _paths
+# 手工记账要借规则解析器算「某个玩法是哪几个号」，用它保证界面选的号
+# 和文本规则算出来的号永远同一套（bet_rules 不碰 main，不会抢锁/建 app）
+import bet_rules
 
 # 版本号规则：主.次.修订。修 bug / 改文案 → 修订号；加功能 → 次版本；
 # 换底层方案（换存储、换协议、旧数据不兼容）→ 主版本。
@@ -1772,14 +1775,23 @@ class MainWindow:
             self._toast("生肖表是空的，先看看日志页有没有报错")
             return
         chats = self._recent_chats()
+        port = int(self.v_port.get() or 8899)
 
-        def _done(notes, chat):
-            total = sum(n["total"] for n in notes)
-            self._toast("界面预览版：%d 注、合计 %s 元 —— 记账逻辑还没接"
-                        % (len(notes), fmt_money(total)))
+        def _submit(payload):
+            """窗口把清单拼成客户原话交给服务端记账。
+
+            不在这里写账本 —— 手记和微信推送必须同一条落账链路，
+            期号归档、港澳分盘、流水、撤销才不会有第二套算法。
+            """
+            if not health(port)[0]:
+                return {"ok": False, "error": "服务没在跑，先点右上角「启动服务」"}
+            d = api_post("/api/quick_bet", payload, port)
+            if d.get("ok"):
+                self.refresh_overview()
+            return d
 
         ManualBetDialog(self.root, mapping, msb_view.grid_rows(self.acc), chats,
-                        on_submit=_done,
+                        account=self.acc, on_submit=_submit,
                         demo=(os.environ.get("MSB_MANUAL") or "") == "2")
 
     def open_quick(self):
@@ -2089,343 +2101,801 @@ class QuickBetDialog(tk.Toplevel):
 
 
 class ManualBetDialog(tk.Toplevel):
-    """手工补录：点号码 / 点生肖 / 点波段，再填一个金额，回车成注。
+    """手工补录：点号码 / 生肖 / 玩法，填一个金额，回车成注。
 
-    不用打字。号码是多选「每号各记这个金额」，生肖是「一共这个金额、摊到它名下
-    的号上」——这两种口径在实体单上本来就不一样，界面上写清楚，清单里也写出来。
-    波段（波色 / 头组 / 大小单双 / 尾数）这一版只灰着摆出来，看得见有哪些玩法、
-    不能点：它们各自一套赔率，记进号码盘会把 10 块记成 170 块。
+    口径只有一条：**每个被选中的号码各记这个金额**，不摊开、不折算。
+    生肖点一下＝选它名下那几个号；「大」「单」这类点一下＝选该集合的号。
+    多个生肖取并集（牛马＝9 号），多个玩法取交集（大+单＝13 号），
+    生肖与玩法之间也取交集（牛马再点大＝23/25/37/49 里的 5 个）。
+    点具体号码时，生肖/玩法条件让位给号码 —— 否则"这注到底算哪个"说不清。
+
+    记账不另起一套：把清单拼成客户原话（"牛各100；大单各50"）交给
+    /api/quick_bet，和微信推送走同一条落账链路 —— 期号归档、港澳分盘、
+    流水、撤销都自动继承，手记和推送不会算出两个数。
+    拼完先用规则解析器自检，号码集合与每号金额都对得上才提交；
+    对不上就退回「号码 + 金额」的写法，绝不把一笔记成别的。
     """
 
-    HINT = "点号码（每号各记）／点生肖（总额摊开）／填金额回车加入"
-
     COLORS = {"红波": "#c0392b", "蓝波": "#1f6feb", "绿波": "#1a7f37"}
-    PICK_BORDER = "#f59e0b"
+    PICK_BG = "#111827"
+    PICK_EDGE = "#ffffff"
+    LIMIT_CONFIRM = 1000.0          # 合计超过这个数，记账前再问一次
 
-    OPTIONS = [
-        ("红波", "波色"), ("蓝波", "波色"), ("绿波", "波色"),
-        ("红单", "波色单双"), ("红双", "波色单双"),
-        ("蓝单", "波色单双"), ("蓝双", "波色单双"),
-        ("绿单", "波色单双"), ("绿双", "波色单双"),
-        ("0头", "头组"), ("1头", "头组"), ("2头", "头组"),
-        ("3头", "头组"), ("4头", "头组"),
-        ("大", "大小"), ("小", "大小"), ("单", "单双"), ("双", "单双"),
-        ("尾数", "尾数"), ("五行", "五行"),
+    QUICK_AMTS = ["10", "20", "50", "100", "200", "500"]
+
+    # (组名, [(按钮文字, 拼进原文的写法)])
+    PLAY_GROUPS = [
+        ("单双", [("单", "单"), ("双", "双")]),
+        ("大小", [("大", "大"), ("小", "小")]),
+        ("波色", [("红波", "红波"), ("蓝波", "蓝波"), ("绿波", "绿波")]),
+        ("波色单双", [("红单", "红单"), ("红双", "红双"),
+                     ("蓝单", "蓝单"), ("蓝双", "蓝双"),
+                     ("绿单", "绿单"), ("绿双", "绿双")]),
+        ("波色大小", [("红小", "红小"), ("红大", "红大"),
+                     ("蓝小", "蓝小"), ("蓝大", "蓝大"),
+                     ("绿小", "绿小"), ("绿大", "绿大")]),
+        ("合数", [("合数单", "合数单"), ("合数双", "合数双")]),
+        ("尾数", [(str(i) + "尾", str(i) + "尾") for i in range(10)]),
+        ("头数", [(str(i) + "头", str(i) + "头") for i in range(5)]),
+        ("五行", [("金", "金"), ("木", "木"), ("水", "水"),
+                 ("火", "火"), ("土", "土")]),
+        ("其它", [("家禽", "家禽"), ("野兽", "野兽")]),
     ]
 
-    def __init__(self, master, mapping, grid, chats, on_submit=None, demo=False):
+    def __init__(self, master, mapping, grid, chats, account="", on_submit=None,
+                 demo=False):
         super().__init__(master)
         self.title("手工记账")
-        self.configure(bg=CLR_CARD)
+        self.configure(bg=CLR_BG)
         self.transient(master)
         self.mapping = mapping or {}
         self.grid = list(grid or [])
         self.chats = list(chats or [])
         self.on_submit = on_submit
-        self.notes = []              # 已加入的注：{applied, total, desc}
-        self.sel_nums = set()
-        self.sel_zodiac = None
+        self.account = account or "default"
+
+        self.notes = []                 # 已加入的注：text/label/nums/each/total
+        self.sel_nums = set()           # 直接点的号
+        self.sel_z = set()              # 生肖（并集）
+        self.sel_p = set()              # 玩法（交集）
+        self._pn = {}                   # 玩法写法 → 号码集合，缓存
         self._num_lb = {}
+        self._num_bg = {}
         self._z_lb = {}
+        self._p_lb = {}
+        self._p_disp = {}
+        self._mk_lb = {}
+        self._fw = []                   # [(widget, 字号档)]，缩放时统一改
+        self._busy = False
         self._event = None
+        self._scale = 1.0
+
+        self.v_market = tk.StringVar(value="MO")     # 默认澳门
+        self.v_chat = tk.StringVar()
+        self.v_amt = tk.StringVar()
+        self.v_loop = tk.BooleanVar(value=False)
+
+        self._accounts = self._load_accounts()
+        if self._accounts and self.account not in self._accounts:
+            self.account = self._accounts[0]
+        self.v_acc = tk.StringVar(value=self.account)
+
         self._build()
         self.update_idletasks()
-        self.geometry("680x820+%d+%d" % (
-            max(0, master.winfo_rootx() + (master.winfo_width() - 680) // 2),
-            max(0, master.winfo_rooty() + (master.winfo_height() - 820) // 2)))
+        w, h = 1060, 920
+        try:
+            x = master.winfo_rootx() + max(0, (master.winfo_width() - w) // 2)
+            y = master.winfo_rooty() + max(0, (master.winfo_height() - h) // 2)
+        except Exception:
+            x = y = 0
+        self.geometry("%dx%d+%d+%d" % (w, h, max(0, x), max(0, y)))
+        self.minsize(980, 800)
         self.update()
-        self.minsize(680, 820)
-        self.maxsize(680, 820)
         self._repaint()
         try:
             self.grab_set()
         except Exception:
             pass
         if demo:
-            self.after(250, self._demo)
+            self.after(300, self._demo)
 
-    def _demo(self):
-        """只在 MSB_MANUAL=2 调试时用：预填几注，方便截图看效果。"""
-        self.v_chat.set(self.chats[0] if self.chats else "老郭")
-        self.sel_nums = {"06", "18"}
-        self.v_amt.set("50")
-        self._repaint()
-        self._add()
-        self.sel_zodiac = "牛"
-        self.v_amt.set("100")
-        self._repaint()
-        self._add()
-        self.sel_zodiac = None
-        self.sel_nums = {"06", "18"}
-        self.v_amt.set("50")
-        self._repaint()
-        self.lb_note.configure(text="")
-        self._refresh_foot()
+    def _load_accounts(self):
+        """账号下拉：只列真接过账的号，免得选到一个不存在的账号。"""
+        d = api_get("/api/accounts")
+        out = [str(a.get("account") or "") for a in (d.get("accounts") or [])]
+        out = [a for a in out if a]
+        if out:
+            return out
+        return [self.account] if self.account else []
+
+    # ---------- 字号 ----------
+    def _font(self, kind="body"):
+        size, weight = {
+            "title": (16, "bold"), "body": (11, ""),
+            "small": (10, ""), "tiny": (9, ""),
+        }.get(kind, (11, ""))
+        size = max(8, int(round(size * self._scale)))
+        fam = "Microsoft YaHei UI"
+        return (fam, size, weight) if weight else (fam, size)
+
+    def _num_size(self):
+        h = 0
+        try:
+            h = self.board.winfo_height()
+        except Exception:
+            pass
+        n = max(1, len(self.grid))
+        if h < 40:
+            return 14
+        return int(max(10, min(20, (h / float(n)) * 0.52)))
+
+    def _num_font(self):
+        return ("Consolas", self._num_size(), "bold")
+
+    def _lbl(self, parent, text="", kind="body", **kw):
+        lb = tk.Label(parent, text=text, font=self._font(kind), **kw)
+        self._fw.append((lb, kind))
+        return lb
+
+    def _on_conf(self, e=None):
+        if e is not None and e.widget is not self:
+            return
+        w = max(1, self.winfo_width())
+        s = max(0.90, min(1.45, w / 1060.0))
+        if abs(s - self._scale) < 0.02:
+            return
+        self._scale = s
+        self._restyle()
+
+    def _restyle(self):
+        for w, kind in self._fw:
+            try:
+                w.configure(font=self._font(kind))
+            except Exception:
+                pass
+        nf = self._num_font()
+        for lb in self._num_lb.values():
+            try:
+                lb.configure(font=nf)
+            except Exception:
+                pass
+        try:
+            self.style.configure("Man.Treeview", font=self._font("small"),
+                                 rowheight=int(22 * self._scale))
+            self.style.configure("Man.Treeview.Heading", font=self._font("small"))
+        except Exception:
+            pass
 
     # ---------- 界面 ----------
     def _build(self):
-        wrap = tk.Frame(self, bg=CLR_CARD)
-        wrap.pack(fill="both", expand=True, padx=14, pady=10)
+        wrap = tk.Frame(self, bg=CLR_BG)
+        wrap.pack(fill="both", expand=True, padx=14, pady=(12, 8))
         wrap.grid_columnconfigure(0, weight=1)
+        wrap.grid_rowconfigure(2, weight=3)
+        wrap.grid_rowconfigure(3, weight=2)
 
-        tk.Label(wrap, text="手工记账", font=FONT_T, bg=CLR_CARD, fg="#111827"
-                 ).grid(row=0, column=0, sticky="w")
-        tk.Label(wrap, text=self.HINT, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
-                 ).grid(row=1, column=0, sticky="w", pady=(2, 8))
+        # ---- 顶部：标题 / 盘口 / 账号 / 对象 ----
+        top = tk.Frame(wrap, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                       highlightthickness=1)
+        top.grid(row=0, column=0, sticky="ew")
+        t = tk.Frame(top, bg=CLR_CARD)
+        t.pack(fill="x", padx=12, pady=9)
 
-        # 号码盘：一行一个生肖，格子里是号，底色就是波色
-        board = tk.Frame(wrap, bg=CLR_CARD)
-        board.grid(row=2, column=0, sticky="w")
+        self._lbl(t, "手工记账", "title", bg=CLR_CARD, fg="#111827").pack(side="left")
+
+        seg = tk.Frame(t, bg="#eef0f3")
+        seg.pack(side="left", padx=(20, 0))
+        for mk, name in (("MO", "澳门"), ("HK", "香港")):
+            b = tk.Label(seg, text=name, font=self._font("small"), bg="#eef0f3",
+                         fg="#374151", padx=12, pady=3, cursor="hand2")
+            b.pack(side="left", padx=1, pady=1)
+            b.bind("<Button-1>", lambda e, m=mk: self._pick_market(m))
+            self._mk_lb[mk] = b
+            self._fw.append((b, "small"))
+
+        self._lbl(t, "挂在谁名下", "small", bg=CLR_CARD, fg=CLR_MUTED
+                  ).pack(side="right")
+        self.cb_chat = ttk.Combobox(t, textvariable=self.v_chat,
+                                    font=self._font("small"), values=self.chats,
+                                    width=16)
+        self.cb_chat.pack(side="right", padx=(6, 14))
+        self.cb_chat.bind("<KeyRelease>", lambda e: self._refresh_foot())
+        self.cb_chat.bind("<<ComboboxSelected>>", lambda e: self._refresh_foot())
+        self._fw.append((self.cb_chat, "small"))
+
+        self._lbl(t, "记入账号", "small", bg=CLR_CARD, fg=CLR_MUTED
+                  ).pack(side="right")
+        cb_acc = ttk.Combobox(t, textvariable=self.v_acc, state="readonly",
+                              font=self._font("small"), values=self._accounts,
+                              width=16)
+        cb_acc.pack(side="right", padx=6)
+        self._fw.append((cb_acc, "small"))
+
+        # ---- 条件回显 ----
+        self.lb_hint = self._lbl(wrap, "", "small", bg=CLR_BG, fg=CLR_MUTED,
+                                 anchor="w", justify="left")
+        self.lb_hint.grid(row=1, column=0, sticky="ew", pady=(8, 6))
+
+        # ---- 主体：左号码盘 / 右操作区 ----
+        body = tk.Frame(wrap, bg=CLR_BG)
+        body.grid(row=2, column=0, sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        bcard = tk.Frame(body, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                         highlightthickness=1)
+        bcard.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.board = tk.Frame(bcard, bg=CLR_CARD)
+        self.board.pack(fill="both", expand=True, padx=12, pady=10)
+        for c in range(6):
+            self.board.grid_columnconfigure(c, weight=(1 if c else 0))
         for r, rowd in enumerate(self.grid):
-            tk.Label(board, text=rowd["zodiac"], font=FONT_S, bg=CLR_CARD,
-                     fg="#374151", width=2, anchor="w").grid(row=r, column=0, sticky="w")
+            self.board.grid_rowconfigure(r, weight=1)
+            zlb = self._lbl(self.board, rowd["zodiac"], "tiny", bg=CLR_CARD,
+                            fg="#374151", width=2, anchor="w")
+            zlb.grid(row=r, column=0, sticky="w")
             for c, cell in enumerate(rowd["cells"], 1):
                 n = cell["num"]
-                color = self.COLORS.get(cell.get("color"), "#6b7280")
-                lb = tk.Label(board, text=n, font=FONT_NUM, bg=color, fg="white",
-                              width=3, cursor="hand2", padx=1, pady=2,
-                              highlightthickness=2, highlightbackground=color)
-                lb.grid(row=r, column=c, padx=1, pady=1)
+                color = self.COLORS.get(cell.get("color") or "", "#6b7280")
+                self._num_bg[n] = color
+                lb = tk.Label(self.board, text=n, bg=color, fg="white",
+                              font=self._num_font(), cursor="hand2",
+                              highlightthickness=3,
+                              highlightbackground=color, padx=1, pady=1)
+                lb.grid(row=r, column=c, sticky="nsew", padx=2, pady=2)
                 lb.bind("<Button-1>", lambda e, x=n: self._pick_num(x))
                 self._num_lb[n] = lb
 
-        # 生肖：点一下等于选了它名下所有号，但按「总额摊开」算
-        zbar = tk.Frame(wrap, bg=CLR_CARD)
-        zbar.grid(row=3, column=0, sticky="w", pady=(10, 0))
-        tk.Label(zbar, text="生肖", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
-                 ).grid(row=0, column=0, padx=(0, 6))
-        for i, rowd in enumerate(self.grid, 1):
-            z = rowd["zodiac"]
-            b = tk.Label(zbar, text=z, font=FONT_S, bg="#eef0f3", fg="#374151",
-                         width=2, cursor="hand2", padx=2, pady=3)
-            b.grid(row=0, column=i, padx=1)
-            b.bind("<Button-1>", lambda e, x=z: self._pick_zodiac(x))
-            self._z_lb[z] = b
+        # 右栏：Canvas 竖滚。玩法按钮多，窗口一矮就得能滚
+        rcard = tk.Frame(body, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                         highlightthickness=1)
+        rcard.grid(row=0, column=1, sticky="ns", padx=(0, 0))
+        self.canvas = tk.Canvas(rcard, bg=CLR_CARD, highlightthickness=0, width=372)
+        vsb = ttk.Scrollbar(rcard, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.ops = tk.Frame(self.canvas, bg=CLR_CARD)
+        self._cwin = self.canvas.create_window((0, 0), window=self.ops, anchor="nw")
+        self.ops.bind("<Configure>",
+                      lambda e: self.canvas.configure(
+                          scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>",
+                         lambda e: self.canvas.itemconfigure(self._cwin, width=e.width))
+        self.canvas.bind("<MouseWheel>", self._wheel)
+        self.ops.bind("<MouseWheel>", self._wheel)
 
-        # 波段：这一版灰着，只让人看见有哪些玩法，点不动
-        obar = tk.Frame(wrap, bg=CLR_CARD)
-        obar.grid(row=4, column=0, sticky="w", pady=(8, 0))
-        tk.Label(obar, text="波段", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
-                 ).grid(row=0, column=0, rowspan=2, padx=(0, 6))
-        for i, (name, kind) in enumerate(self.OPTIONS):
-            r, c = divmod(i, 10)
-            b = tk.Label(obar, text=name, font=FONT_S, bg="#f7f8fa", fg="#c4cad3",
-                         width=4, cursor="arrow", padx=2, pady=3)
-            b.grid(row=r, column=c + 1, padx=1, pady=1)
-        tk.Label(obar, text="（本期未开放）", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
-                 ).grid(row=0, column=11, rowspan=2, padx=(8, 0))
+        # 金额
+        self._lbl(self.ops, "金额（每个号各多少）", "small", bg=CLR_CARD,
+                  fg=CLR_MUTED).pack(anchor="w", padx=12, pady=(10, 0))
+        q = tk.Frame(self.ops, bg=CLR_CARD)
+        q.pack(fill="x", padx=12, pady=(4, 0))
+        for a in self.QUICK_AMTS:
+            b = tk.Label(q, text=a, font=self._font("small"), bg="#eef0f3",
+                         fg="#374151", padx=7, pady=3, cursor="hand2")
+            b.pack(side="left", padx=(0, 4))
+            b.bind("<Button-1>", lambda e, v=a: self._quick_amt(v))
+            self._fw.append((b, "small"))
 
-        # 已选 + 金额 + 加入
-        pick = tk.Frame(wrap, bg=CLR_CARD)
-        pick.grid(row=5, column=0, sticky="ew", pady=(12, 0))
-        tk.Label(pick, text="已选", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
-                 ).pack(side="left")
-        self.lb_pick = tk.Label(pick, text="（还没选）", font=FONT_S,
-                                bg=CLR_CARD, fg=CLR_MUTED, anchor="w")
-        self.lb_pick.pack(side="left", padx=(8, 16))
-        tk.Label(pick, text="金额", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
-                 ).pack(side="left")
-        self.v_amt = tk.StringVar()
-        self.en_amt = tk.Entry(pick, textvariable=self.v_amt, font=FONT, width=9,
-                               relief="flat", bg="#fbfcfd", fg="#111827",
+        row = tk.Frame(self.ops, bg=CLR_CARD)
+        row.pack(fill="x", padx=12, pady=(6, 0))
+        self.en_amt = tk.Entry(row, textvariable=self.v_amt, font=self._font("body"),
+                               width=10, relief="flat", bg="#fbfcfd", fg="#111827",
                                highlightbackground=CLR_LINE, highlightthickness=1,
-                               insertbackground="#111827", justify="right")
-        self.en_amt.pack(side="left", padx=(8, 8), ipady=3)
+                               justify="right", insertbackground="#111827")
+        self.en_amt.pack(side="left", ipady=3)
         self.en_amt.bind("<Return>", lambda e: self._add())
-        self.btn_add = tk.Button(pick, text="加入", font=FONT, bg=CLR_BLUE2, fg="white",
-                                 relief="flat", bd=0, width=6, cursor="hand2",
-                                 command=self._add)
-        self.btn_add.pack(side="left")
+        self.btn_add = tk.Button(row, text="加入", font=self._font("body"),
+                                 bg=CLR_BLUE2, fg="white", relief="flat", bd=0,
+                                 width=6, cursor="hand2", command=self._add)
+        self.btn_add.pack(side="left", padx=(8, 0))
+        self._fw.append((self.en_amt, "body"))
+        self._fw.append((self.btn_add, "body"))
 
-        tk.Label(wrap, text="本次要记的（点「加入」累加）", font=FONT_S,
-                 bg=CLR_CARD, fg=CLR_MUTED).grid(row=6, column=0, sticky="w", pady=(12, 4))
-        lbox = tk.Frame(wrap, bg=CLR_CARD, highlightbackground=CLR_LINE,
-                        highlightthickness=1)
-        lbox.grid(row=7, column=0, sticky="nsew")
-        wrap.grid_rowconfigure(7, weight=1)
-        self.lst = tk.Listbox(lbox, height=6, font=FONT_S, bd=0, relief="flat",
-                              bg="#fbfcfd", fg="#111827", activestyle="none",
-                              highlightthickness=0, selectbackground="#dbeafe")
-        self.lst.pack(fill="both", expand=True, padx=2, pady=2)
+        # 生肖
+        self._lbl(self.ops, "生肖（可多选，取并集）", "small", bg=CLR_CARD,
+                  fg=CLR_MUTED).pack(anchor="w", padx=12, pady=(12, 2))
+        zg = tk.Frame(self.ops, bg=CLR_CARD)
+        zg.pack(fill="x", padx=12)
+        for i, rowd in enumerate(self.grid):
+            z = rowd["zodiac"]
+            r, c = divmod(i, 6)
+            b = tk.Label(zg, text=z, font=self._font("small"), bg="#eef0f3",
+                         fg="#374151", padx=6, pady=3, cursor="hand2")
+            b.grid(row=r, column=c, padx=2, pady=2, sticky="ew")
+            b.bind("<Button-1>", lambda e, x=z: self._pick_z(x))
+            self._z_lb[z] = b
+            self._fw.append((b, "small"))
+        for c in range(6):
+            zg.grid_columnconfigure(c, weight=1)
 
-        foot = tk.Frame(wrap, bg=CLR_CARD)
-        foot.grid(row=8, column=0, sticky="ew", pady=(10, 0))
-        self.lb_total = tk.Label(foot, text="合计 0 元", font=FONT_B,
-                                 bg=CLR_CARD, fg=CLR_RED)
+        # 玩法：单双 / 大小 / 波色 … 一组一行
+        for gname, items in self.PLAY_GROUPS:
+            self._lbl(self.ops, gname + "（可多选，取交集）", "tiny", bg=CLR_CARD,
+                      fg="#9aa3af").pack(anchor="w", padx=12, pady=(9, 1))
+            gf = tk.Frame(self.ops, bg=CLR_CARD)
+            gf.pack(fill="x", padx=12)
+            cols = 6 if len(items) <= 6 else 5
+            for i, (disp, code) in enumerate(items):
+                r, c = divmod(i, cols)
+                b = tk.Label(gf, text=disp, font=self._font("small"), bg="#f7f8fa",
+                             fg="#374151", padx=3, pady=3, cursor="hand2")
+                b.grid(row=r, column=c, padx=1, pady=1, sticky="ew")
+                b.bind("<Button-1>", lambda e, k=code: self._pick_p(k))
+                self._p_lb[code] = b
+                self._p_disp[code] = disp
+                self._fw.append((b, "small"))
+            for c in range(cols):
+                gf.grid_columnconfigure(c, weight=1)
+        tk.Frame(self.ops, bg=CLR_CARD, height=10).pack(fill="x")
+
+        # ---- 清单 ----
+        ncard = tk.Frame(wrap, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                         highlightthickness=1)
+        ncard.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+        head = tk.Frame(ncard, bg=CLR_CARD)
+        head.pack(fill="x", padx=12, pady=(8, 2))
+        self._lbl(head, "本次要记的", "small", bg=CLR_CARD, fg=CLR_MUTED
+                  ).pack(side="left")
+        btn_drop = tk.Button(head, text="删掉选中", font=self._font("small"),
+                             bg="#eef0f3", fg="#374151", relief="flat", bd=0,
+                             width=8, cursor="hand2", command=self._drop)
+        btn_drop.pack(side="right")
+        btn_clear = tk.Button(head, text="清空", font=self._font("small"),
+                              bg="#eef0f3", fg="#374151", relief="flat", bd=0,
+                              width=6, cursor="hand2", command=self._clear)
+        btn_clear.pack(side="right", padx=(0, 6))
+        self._fw.append((btn_drop, "small"))
+        self._fw.append((btn_clear, "small"))
+
+        tv_wrap = tk.Frame(ncard, bg=CLR_CARD)
+        tv_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.style = ttk.Style(self)
+        try:
+            self.style.configure("Man.Treeview", font=self._font("small"),
+                                 rowheight=int(22 * self._scale))
+            self.style.configure("Man.Treeview.Heading", font=self._font("small"))
+        except Exception:
+            pass
+        self.tv = ttk.Treeview(tv_wrap, columns=("desc", "each", "sub"),
+                               show="headings", style="Man.Treeview", height=5)
+        self.tv.heading("desc", text="记什么")
+        self.tv.heading("each", text="每号")
+        self.tv.heading("sub", text="小计")
+        self.tv.column("desc", width=560, anchor="w")
+        self.tv.column("each", width=90, anchor="e")
+        self.tv.column("sub", width=110, anchor="e")
+        tsb = ttk.Scrollbar(tv_wrap, orient="vertical", command=self.tv.yview)
+        self.tv.configure(yscrollcommand=tsb.set)
+        tsb.pack(side="right", fill="y")
+        self.tv.pack(side="left", fill="both", expand=True)
+        self.tv.bind("<Delete>", lambda e: self._drop())
+
+        # ---- 底栏 ----
+        foot = tk.Frame(wrap, bg=CLR_BG)
+        foot.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self.lb_total = self._lbl(foot, "合计 0 元", "title", bg=CLR_BG, fg=CLR_RED)
         self.lb_total.pack(side="left")
-        tk.Label(foot, text="挂在谁名下", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED
-                 ).pack(side="left", padx=(18, 6))
-        self.v_chat = tk.StringVar()
-        self.cb_chat = ttk.Combobox(foot, textvariable=self.v_chat, font=FONT_S,
-                                    width=18, values=self.chats)
-        self.cb_chat.pack(side="left")
-        self.cb_chat.bind("<KeyRelease>", self._on_typed)
-        self.cb_chat.bind("<<ComboboxSelected>>", self._on_typed)
 
-        tk.Button(foot, text="取消", font=FONT, bg="#eef0f3", fg="#374151", relief="flat",
-                  bd=0, width=7, cursor="hand2", command=self.destroy).pack(side="right")
-        self.btn_ok = tk.Button(foot, text="记账", font=FONT, bg=CLR_BLUE, fg="white",
-                                relief="flat", bd=0, width=8, cursor="hand2",
-                                command=self._submit)
-        self.btn_ok.pack(side="right", padx=(0, 6))
-        tk.Button(foot, text="删掉选中", font=FONT_S, bg="#eef0f3", fg="#374151",
-                  relief="flat", bd=0, width=8, cursor="hand2",
-                  command=self._drop).pack(side="right", padx=(0, 12))
+        self.btn_ok = tk.Button(foot, text="记账", font=self._font("body"),
+                                bg=CLR_BLUE, fg="white", relief="flat", bd=0,
+                                width=9, cursor="hand2", command=self._submit)
+        self.btn_ok.pack(side="right")
+        btn_cancel = tk.Button(foot, text="取消", font=self._font("body"),
+                               bg="#eef0f3", fg="#374151", relief="flat", bd=0,
+                               width=7, cursor="hand2", command=self._close)
+        btn_cancel.pack(side="right", padx=(0, 8))
+        chk = tk.Checkbutton(foot, text="连续记账", variable=self.v_loop,
+                             font=self._font("small"), bg=CLR_BG, fg=CLR_MUTED,
+                             activebackground=CLR_BG, selectcolor=CLR_BG,
+                             bd=0, highlightthickness=0, cursor="hand2")
+        chk.pack(side="right", padx=(0, 20))
+        self._fw.append((self.btn_ok, "body"))
+        self._fw.append((btn_cancel, "body"))
+        self._fw.append((chk, "small"))
 
-        self.lb_note = tk.Label(wrap, text="", font=FONT_S, bg=CLR_CARD, fg=CLR_BAD,
-                                anchor="w")
-        self.lb_note.grid(row=9, column=0, sticky="w", pady=(6, 0))
+        self.lb_note = self._lbl(wrap, "", "small", bg=CLR_BG, fg=CLR_BAD, anchor="w")
+        self.lb_note.grid(row=5, column=0, sticky="ew", pady=(4, 0))
 
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Escape>", lambda e: self._close())
+        self.bind("<Control-Return>", lambda e: self._submit())
+        self.bind("<Configure>", self._on_conf)
 
     # ---------- 点选 ----------
+    def _wheel(self, e):
+        try:
+            self.canvas.yview_scroll(int(-1 * (e.delta / 120.0)), "units")
+        except Exception:
+            pass
+
+    def _pick_market(self, mk):
+        self.v_market.set(mk)
+        self._repaint()
+
     def _pick_num(self, n):
-        self.sel_zodiac = None
+        self.sel_z = set()
+        self.sel_p = set()
         if n in self.sel_nums:
             self.sel_nums.discard(n)
         else:
             self.sel_nums.add(n)
         self._repaint()
 
-    def _pick_zodiac(self, z):
+    def _pick_z(self, z):
         self.sel_nums = set()
-        self.sel_zodiac = None if self.sel_zodiac == z else z
+        if z in self.sel_z:
+            self.sel_z.discard(z)
+        else:
+            self.sel_z.add(z)
         self._repaint()
 
-    def _repaint(self):
-        sel = self.sel_nums
-        for n, lb in self._num_lb.items():
-            on = n in sel
-            lb.configure(text=("✓" + n) if on else n,
-                         width=4 if on else 3,
-                         font=FONT_B if on else FONT_NUM,
-                         highlightbackground=self.PICK_BORDER if on else lb.cget("bg"))
-        for z, b in self._z_lb.items():
-            on = (self.sel_zodiac == z)
-            b.configure(bg="#fde68a" if on else "#eef0f3",
-                        fg="#92400e" if on else "#374151")
-
-        if self.sel_zodiac:
-            nums = sorted(self.mapping.get(self.sel_zodiac, []))
-            self.lb_pick.configure(
-                text="%s（%s）· 填的金额是这一组的总数" % (self.sel_zodiac, "/".join(nums)),
-                fg="#92400e")
-        elif self.sel_nums:
-            self.lb_pick.configure(
-                text="%s · 每号各记填的金额" % " ".join(sorted(self.sel_nums)),
-                fg="#92400e")
+    def _pick_p(self, k):
+        self.sel_nums = set()
+        if k in self.sel_p:
+            self.sel_p.discard(k)
         else:
-            self.lb_pick.configure(text="（还没选）", fg=CLR_MUTED)
+            self.sel_p.add(k)
+        self._repaint()
 
+    def _quick_amt(self, v):
+        self.v_amt.set(v)
+        self.en_amt.focus_set()
+        self.en_amt.icursor("end")
+        self._repaint()
+
+    # ---------- 集合 ----------
+    def _nums_of_play(self, code):
+        """玩法写法 → 号码集合。借规则解析器算，界面和账本永远同一套。"""
+        if code in self._pn:
+            return self._pn[code]
+        out = set()
+        for cand in (code + "各1", code + "1"):
+            r = bet_rules.parse_local(cand, self.mapping)
+            if r.get("ok") and r.get("bets"):
+                if all(abs(float(v) - 1.0) < 1e-9 for v in r["bets"].values()):
+                    out = set(r["bets"].keys())
+                    break
+        self._pn[code] = out
+        return out
+
+    def _target(self):
+        if self.sel_nums:
+            return set(self.sel_nums)
+        zs = set()
+        for z in self.sel_z:
+            zs |= set(self.mapping.get(z, []))
+        if not self.sel_p:
+            return zs
+        ps = None
+        for k in self.sel_p:
+            s = self._nums_of_play(k)
+            ps = set(s) if ps is None else (ps & s)
+        if ps is None:
+            return zs
+        if zs:
+            ps = ps & zs
+        return ps
+
+    # ---------- 文案 ----------
+    def _read_amt(self):
+        raw = (self.v_amt.get() or "").strip().replace("，", "").replace(",", "")
+        try:
+            v = float(raw)
+        except Exception:
+            return None
+        if v <= 0 or v > 1e7:
+            return None
+        return round(v, 2)
+
+    @staticmethod
+    def _amt_str(v):
+        return ("%.2f" % float(v)).rstrip("0").rstrip(".")
+
+    def _combo_name(self):
+        """多玩法 → 一个能写进原文的组合名（大单 / 红单 / 红小）。"""
+        p = self.sel_p
+        if len(p) == 1:
+            return next(iter(p))
+        if p == {"大", "单"}:
+            return "大单"
+        if p == {"大", "双"}:
+            return "大双"
+        if p == {"小", "单"}:
+            return "小单"
+        if p == {"小", "双"}:
+            return "小双"
+        wave = {"红波": "红", "蓝波": "蓝", "绿波": "绿"}
+        w = [k for k in p if k in wave]
+        o = [k for k in p if k not in wave]
+        if len(w) == 1 and len(o) == 1 and o[0] in ("单", "双", "大", "小"):
+            return wave[w[0]] + o[0]
+        return ""
+
+    def _compose_text(self, tgt):
+        """清单里的这一注，拼成原文用的话。拼不出来就退回号码。"""
+        if self.sel_nums:
+            return " ".join(sorted(tgt))
+        if self.sel_z and not self.sel_p:
+            order = [rowd["zodiac"] for rowd in self.grid]
+            return "".join(z for z in order if z in self.sel_z)
+        if self.sel_p and not self.sel_z:
+            name = self._combo_name()
+            return name or " ".join(sorted(tgt))
+        return " ".join(sorted(tgt))
+
+    def _verify(self, text, nums, amt):
+        """拼出来的话，规则解析器得认成同一组号、同一个单价。"""
+        s = "%s各%s" % (text, self._amt_str(amt))
+        r = bet_rules.parse_local(s, self.mapping)
+        if not r.get("ok"):
+            return False
+        bets = r.get("bets") or {}
+        if set(bets.keys()) != set(nums):
+            return False
+        return all(abs(float(bets[n]) - amt) < 1e-6 for n in nums)
+
+    def _label(self, tgt):
+        parts = []
+        if self.sel_nums:
+            parts.append("号码")
+        else:
+            if self.sel_z:
+                order = [rowd["zodiac"] for rowd in self.grid]
+                parts.append("+".join(z for z in order if z in self.sel_z))
+            if self.sel_p:
+                parts.append("∩".join(self._p_disp.get(k, k) for k in sorted(self.sel_p)))
+        nums = sorted(tgt)
+        preview = "/".join(nums) if len(nums) <= 8 else "%d 个号" % len(nums)
+        return "%s（%s）" % ("·".join(parts) or "号码", preview)
+
+    def _hint_text(self, tgt):
+        parts = []
+        if self.sel_nums:
+            parts.append("号码 " + " ".join(sorted(self.sel_nums)))
+        else:
+            if self.sel_z:
+                order = [rowd["zodiac"] for rowd in self.grid]
+                parts.append("+".join(z for z in order if z in self.sel_z))
+            if self.sel_p:
+                parts.append("∩".join(self._p_disp.get(k, k) for k in sorted(self.sel_p)))
+        if not parts:
+            return "点号码 / 生肖 / 玩法；填的金额＝每个号各多少"
+        head = "条件：" + " · ".join(parts)
+        if not tgt:
+            return head + " → 没有共同的号，换个选法"
+        nums = sorted(tgt)
+        show = " ".join(nums) if len(nums) <= 14 else " ".join(nums[:14]) + " …"
+        amt = self._read_amt()
+        tail = ("每号 %s · 合计 %s" % (self._amt_str(amt),
+                                     fmt_money(amt * len(nums)))) if amt else "每号 —"
+        return "%s → %d 个号：%s · %s" % (head, len(nums), show, tail)
+
+    # ---------- 重绘 ----------
+    def _repaint(self):
+        tgt = self._target()
+        for n, lb in self._num_lb.items():
+            on = n in tgt
+            try:
+                lb.configure(bg=(self.PICK_BG if on else self._num_bg.get(n, "#6b7280")),
+                             fg="white",
+                             highlightbackground=(self.PICK_EDGE if on
+                                                 else self._num_bg.get(n, "#6b7280")))
+            except Exception:
+                pass
+        for z, b in self._z_lb.items():
+            on = z in self.sel_z
+            try:
+                b.configure(bg="#fde68a" if on else "#eef0f3",
+                            fg="#92400e" if on else "#374151")
+            except Exception:
+                pass
+        for k, b in self._p_lb.items():
+            on = k in self.sel_p
+            try:
+                b.configure(bg="#dbeafe" if on else "#f7f8fa",
+                            fg="#1e40af" if on else "#374151")
+            except Exception:
+                pass
+        for mk, b in self._mk_lb.items():
+            on = (self.v_market.get() == mk)
+            try:
+                b.configure(bg=CLR_BLUE if on else "#eef0f3",
+                            fg="white" if on else "#374151")
+            except Exception:
+                pass
+        try:
+            self.lb_hint.configure(text=self._hint_text(tgt),
+                                   fg=(CLR_MUTED if tgt else "#b45309"))
+        except Exception:
+            pass
         self._refresh_foot()
 
-    # ---------- 加入 ----------
-    def _add(self):
-        raw = (self.v_amt.get() or "").strip().replace("，", "")
+    def _refresh_list(self):
+        for iid in self.tv.get_children():
+            self.tv.delete(iid)
+        for i, n in enumerate(self.notes):
+            self.tv.insert("", "end", iid=str(i), values=(
+                "%d. %s" % (i + 1, n["label"]),
+                self._amt_str(n["each"]), fmt_money(n["total"])))
+        total = sum(n["total"] for n in self.notes)
+        cnt = sum(len(n["nums"]) for n in self.notes)
+        self.lb_total.configure(text="合计 %s 元 / %d 个号 / %d 注"
+                                % (fmt_money(total), cnt, len(self.notes)))
+        self._refresh_foot()
+
+    def _refresh_foot(self):
+        chat = (self.v_chat.get() or "").strip()
+        ok = bool(self.notes) and bool(chat) and not self._busy
         try:
-            amount = float(raw)
+            self.btn_ok.configure(state="normal" if ok else "disabled",
+                                  bg=CLR_BLUE if ok else "#9bb4dd")
         except Exception:
-            return self._say("金额写个数字，比如 50")
-        if amount <= 0:
-            return self._say("金额要大于 0")
+            pass
+        if self.notes and not chat:
+            self._say("填一下挂在谁名下")
 
-        if self.sel_zodiac:
-            nums = sorted(self.mapping.get(self.sel_zodiac, []))
-            if not nums:
-                return self._say("生肖表里没有「%s」" % self.sel_zodiac)
-            applied = self._split(nums, amount, pool=True)
-            desc = "%s（%s）各 %s，合计 %s" % (
-                self.sel_zodiac, "/".join(nums),
-                self._money(round(amount / len(nums), 2)), self._money(amount))
-        elif self.sel_nums:
-            nums = sorted(self.sel_nums)
-            applied = self._split(nums, amount, pool=False)
-            desc = "%s 各 %s，合计 %s" % (
-                " ".join(nums), self._money(amount),
-                self._money(round(amount * len(nums), 2)))
+    def _say(self, msg, color=CLR_BAD):
+        try:
+            self.lb_note.configure(text=msg, fg=color)
+        except Exception:
+            return
+        if self._event:
+            try:
+                self.after_cancel(self._event)
+            except Exception:
+                pass
+        if msg and color != CLR_OK:
+            self._event = self.after(3500, lambda: self.lb_note.configure(text=""))
         else:
-            return self._say("先点号码或生肖")
+            self._event = None
 
-        self.notes.append({"applied": applied, "desc": desc,
-                           "total": round(sum(applied.values()), 2)})
+    # ---------- 加入 / 删除 ----------
+    def _add(self):
+        if self._busy:
+            return
+        amt = self._read_amt()
+        if amt is None:
+            return self._say("金额写个数字，比如 50")
+        tgt = self._target()
+        if not tgt:
+            return self._say("这组条件是空的，先选号码或换个玩法")
+        text = self._compose_text(tgt)
+        if not self._verify(text, tgt, amt):
+            text = " ".join(sorted(tgt))
+            if not self._verify(text, tgt, amt):
+                return self._say("这组号拼不出规则能懂的话，换个选法再试")
+        self.notes.append({
+            "text": text, "label": self._label(tgt), "nums": sorted(tgt),
+            "each": amt, "total": round(amt * len(tgt), 2),
+        })
         self.sel_nums = set()
-        self.sel_zodiac = None
+        self.sel_z = set()
+        self.sel_p = set()
         self.v_amt.set("")
         self._say("")
         self._refresh_list()
         self._repaint()
         self.en_amt.focus_set()
 
-    @staticmethod
-    def _split(nums, amount, pool):
-        out = {}
-        if pool:
-            n = len(nums)
-            per = round(amount / n, 2)
-            last = round(amount - per * (n - 1), 2)
-            for i, num in enumerate(nums):
-                out[num] = last if i == n - 1 else per
-        else:
-            for num in nums:
-                out[num] = round(amount, 2)
-        return out
-
-    @staticmethod
-    def _money(v):
-        s = ("%.2f" % float(v)).rstrip("0").rstrip(".")
-        return s if s else "0"
-
     def _drop(self):
-        idx = self.lst.curselection()
-        if not idx:
+        sel = self.tv.selection()
+        if not sel:
             return self._say("先在清单里点一行")
-        self.notes.pop(idx[0])
+        try:
+            idx = int(sel[0])
+        except Exception:
+            return
+        if 0 <= idx < len(self.notes):
+            self.notes.pop(idx)
         self._refresh_list()
 
-    def _refresh_list(self):
-        self.lst.delete(0, "end")
-        for i, n in enumerate(self.notes):
-            self.lst.insert("end", "%d. %s" % (i + 1, n["desc"]))
-        self.lb_total.configure(
-            text="合计 %s 元 / %d 注" % (
-                self._money(sum(n["total"] for n in self.notes)), len(self.notes)))
-        self._refresh_foot()
+    def _clear(self):
+        self.notes = []
+        self._refresh_list()
 
-    def _refresh_foot(self):
-        chat = (self.v_chat.get() or "").strip()
-        ok = bool(self.notes) and bool(chat)
-        try:
-            self.btn_ok.configure(state="normal" if ok else "disabled")
-        except Exception:
-            pass
-        if not ok and self.notes and not chat:
-            self.lb_note.configure(text="填一下挂在谁名下")
-
-    def _say(self, msg):
-        self.lb_note.configure(text=msg)
-        if self._event:
-            try:
-                self.after_cancel(self._event)
-            except Exception:
-                pass
-        if msg:
-            self._event = self.after(3000, lambda: self.lb_note.configure(text=""))
-
-    def _on_typed(self, event=None):
-        self.lb_note.configure(text="")
-        self._refresh_foot()
+    # ---------- 记账 ----------
+    def _verify_join(self, joined):
+        """整句拼一起后，解析结果得等于清单的合并结果。"""
+        expect = {}
+        for n in self.notes:
+            for num in n["nums"]:
+                expect[num] = round(expect.get(num, 0) + n["each"], 2)
+        r = bet_rules.parse_local(joined, self.mapping)
+        if not r.get("ok"):
+            return False
+        bets = r.get("bets") or {}
+        if set(bets.keys()) != set(expect.keys()):
+            return False
+        return all(abs(float(bets[k]) - expect[k]) < 1e-6 for k in expect)
 
     def _submit(self):
-        if not self.notes:
+        if self._busy or not self.notes:
             return
         chat = (self.v_chat.get() or "").strip()
         if not chat:
             self._say("填一下挂在谁名下")
             self.cb_chat.focus_set()
             return
-        if self.on_submit:
-            self.on_submit(self.notes, chat)
-        self.destroy()
+        total = sum(n["total"] for n in self.notes)
+        if total > self.LIMIT_CONFIRM:
+            if not messagebox.askyesno(
+                    "确认金额",
+                    "这次要记 %s 元（%d 注，%d 个号），\n确认记吗？"
+                    % (fmt_money(total), len(self.notes),
+                       sum(len(n["nums"]) for n in self.notes)),
+                    parent=self):
+                return
+        mk = self.v_market.get()
+        acc = (self.v_acc.get() or "").strip() or self.account
+        each = [(n["text"], n["each"]) for n in self.notes]
+
+        self._busy = True
+        try:
+            joined = "；".join("%s各%s" % (t, self._amt_str(a)) for t, a in each)
+            if self._verify_join(joined):
+                res = self.on_submit({"text": joined, "chat": chat,
+                                      "account": acc, "market": mk}) \
+                    if self.on_submit else {"ok": False, "error": "没有提交入口"}
+            else:
+                # 整句拼不通就逐注记：宁可多几条流水，也不把账记错
+                fails = []
+                res = None
+                for i, (t, a) in enumerate(each):
+                    r = self.on_submit({"text": "%s各%s" % (t, self._amt_str(a)),
+                                        "chat": chat, "account": acc, "market": mk}) \
+                        if self.on_submit else {"ok": False, "error": "没有提交入口"}
+                    if not r.get("ok"):
+                        fails.append("第%d注：%s" % (i + 1, r.get("error") or r.get("reason") or "失败"))
+                    elif res is None:
+                        res = r
+                if fails:
+                    res = {"ok": False, "error": "；".join(fails)}
+                elif res is None:
+                    res = {"ok": False, "error": "没有提交入口"}
+        finally:
+            self._busy = False
+
+        if not res or not res.get("ok"):
+            why = (res or {}).get("error") or (res or {}).get("reason") or "未知原因"
+            self._say("没记上：%s\n清单还在，改完可以再点一次记账" % why, CLR_BAD)
+            return
+
+        mkname = "香港" if (res.get("market") or mk) == "HK" else "澳门"
+        msg = "已记账（%s）：%s 个号 · 合计 %s 元" % (
+            mkname, res.get("numbers") or 0, fmt_money(res.get("total")))
+        if res.get("archived_issue"):
+            msg += "；已换期，上一期 %s 归档" % res.get("archived_issue")
+        if res.get("detail"):
+            msg += "\n" + str(res.get("detail"))
+        self._say(msg, CLR_OK)
+        self.notes = []
+        self._refresh_list()
+        if self.v_loop.get():
+            self._repaint()
+            self.en_amt.focus_set()
+        else:
+            self.after(1400, self._close)
+
+    def _close(self):
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+    # ---------- 调试 ----------
+    def _demo(self):
+        """只在 MSB_MANUAL=2 时用：预填几注，方便截图看效果。"""
+        if self.chats:
+            self.v_chat.set(self.chats[0])
+        self.v_amt.set("100")
+        self.sel_z = {"牛"}
+        self._repaint()
+        self._add()
+        self.v_amt.set("50")
+        self.sel_p = {"大", "单"}
+        self._repaint()
+        self._add()
+        self._say("")
 
 
 if __name__ == "__main__":
