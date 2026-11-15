@@ -572,7 +572,7 @@ class MainWindow:
             tk.Label(rf, text=name, font=("Microsoft YaHei UI", 12, "bold"),
                      bg=CLR_BG, fg="#374151", width=4, anchor="w").pack(side="left")
             t = tk.Label(rf, text="", font=("Microsoft YaHei UI", 11, "bold"),
-                         bg=CLR_BG, fg="#111827", width=20, anchor="e")
+                         bg=CLR_BG, fg="#111827", width=13, anchor="e")
             t.pack(side="right", padx=(4, 0))
             self._zx_total[mk] = t
             cw = tk.Frame(rf, bg=CLR_BG)
@@ -754,11 +754,9 @@ class MainWindow:
                              fg=CLR_RED if amt else CLR_GREY)
             t = self._zx_total.get(mk)
             if t is not None:
+                # 这里只算生肖表（平特 + 连肖）；组合注在下面单独一行，不并进来
                 board_tot = float((b.get("totals") or {}).get("board") or 0)
-                combo_tot = float((b.get("totals") or {}).get("combo") or 0)
-                t.configure(text="合计 %s" % fmt_money(board_tot)
-                            + (" · 组合 %s" % fmt_money(combo_tot)
-                               if combo_tot else ""))
+                t.configure(text="合计 %s" % fmt_money(board_tot))
 
         # 组合注不摊进生肖表，按整注单列。条数多就只列前 5 条 + 省略号
         parts, n, combo_sum = [], 0, 0.0
