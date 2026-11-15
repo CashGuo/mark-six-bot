@@ -120,7 +120,7 @@ td.wxid{color:#8a929e;font-size:11.5px;word-break:break-all;max-width:280px}
     <div class="chip">本期 <b id="issue">—</b></div>
     <div class="chip">生肖年 <b id="zyear">—</b></div>
     <div class="chip">有注号码 <b id="kbets">—</b></div>
-    <div class="chip">今日已记账 <b id="krec">—</b></div>
+    <div class="chip">本期已记账 <b id="krec">—</b></div>
     <div class="chip">今日未解析 <b id="kunp">—</b></div>
     <div class="sp"></div>
     <select id="accSel" onchange="switchAcc(this.value)" style="display:none"></select>
@@ -313,7 +313,8 @@ async function load(){
     document.getElementById('issue').textContent = d.issue || '—';
     document.getElementById('zyear').textContent = (d.zodiac_year || '—') + '年';
     document.getElementById('kbets').textContent = d.numbers_with_bets;
-    document.getElementById('krec').textContent = d.records_today;
+    document.getElementById('krec').textContent =
+      (d.records_current === undefined ? d.records_today : d.records_current);
     document.getElementById('kunp').textContent = d.unparsed_today;
     document.getElementById('meta').innerHTML =
       (d.account ? '账号 ' + esc(d.account) : '全部账号合计') + ' · ' +

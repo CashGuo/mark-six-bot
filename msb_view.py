@@ -461,6 +461,45 @@ def _reversed_rec_ids(account: str = "") -> set:
     return ids
 
 
+def current_bet_count(account: str = "") -> int:
+    """本期已记账的笔数，撤销掉的扣掉。
+
+    撤销不是删行，流水里会多一条 type=reversal；所以这里只数 type 不是
+    reversal、issue 等于本期、且没被任何 reversal_of 点名的行。
+    """
+    accs = [account] if account else all_accounts()
+    cur = current_issue(account)
+    revd = _reversed_rec_ids(account)
+    n = 0
+    for a in accs:
+        p = state_dir() / a / "records.jsonl"
+        if not p.exists():
+            continue
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        r = json.loads(ln)
+                    except Exception:
+                        continue
+                    if not isinstance(r, dict):
+                        continue
+                    if str(r.get("type") or "") == "reversal":
+                        continue
+                    if str(r.get("issue") or "") != cur:
+                        continue
+                    # 撤销点的是 rec_id（"msg#时间戳"），老记录没有 rec_id 才退回 msg_id
+                    if str(r.get("rec_id") or r.get("msg_id") or "") in revd:
+                        continue
+                    n += 1
+        except Exception:
+            continue
+    return n
+
+
 def recent_records(account: str = "", n: int = 40) -> list:
     """最近记账，最新在上。合计视图下把各账号拼起来再统一排序。
 
@@ -604,6 +643,7 @@ def summary(account: str = "", market: str = "MO") -> dict:
         "flat_total": flat,
         "numbers_with_bets": sum(1 for v in data.values() if v > 0),
         "records_today": rec,
+        "records_current": current_bet_count(account),
         "unparsed_today": unp,
         "issue": cur_issue,
         "issue_archived": len(issue_files(account)),

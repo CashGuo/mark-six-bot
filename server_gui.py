@@ -549,8 +549,8 @@ class MainWindow:
         chip("香港", "lb_hk")
         chip("有注号码", "lb_kbets")
         # 平特整肖、二中二这类只记总额、不进号码盘，单独露一个数
-        chip("不计号", "lb_flat")
-        chip("今日已记账", "lb_krec")
+        chip("平特", "lb_flat")
+        chip("本期已记账", "lb_krec")
         # 未解析只统计本期：上几期没解析的单已经随期归档，不该混进来
         chip("本期未解析", "lb_kunp")
 
@@ -1553,7 +1553,7 @@ class MainWindow:
         self.lb_zyear.configure(text="%s年 · %s" % (s["zodiac_year"], s["zodiac"]))
         self.lb_kbets.configure(text=str(s["numbers_with_bets"]))
         self.lb_flat.configure(text=fmt_money(s.get("flat_total") or 0))
-        self.lb_krec.configure(text=str(s["records_today"]))
+        self.lb_krec.configure(text=str(s.get("records_current") or 0))
         cur_issue = str(s.get("issue") or "")
 
         # 期别选择：本期 / 前一期 / 前二期，都是具体日期，选中哪期就看哪期

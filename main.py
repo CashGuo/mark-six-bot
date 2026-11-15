@@ -2470,6 +2470,7 @@ def api_dashboard():
         "markets": banks,
         "numbers_with_bets": sum(1 for v in data.values() if v > 0),
         "records_today": records_today,
+        "records_current": msb_view.current_bet_count(acc or ""),
         "unparsed_today": unparsed_today,
         "zodiac_year": _zodiac_cache["value"][1] if _zodiac_cache["value"] else "",
         "grid": build_grid(data, zodiac_mapping),
