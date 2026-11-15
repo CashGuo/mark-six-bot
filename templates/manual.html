@@ -84,6 +84,8 @@ input:focus,select:focus{outline:2px solid #bfd4ee;outline-offset:-1px}
 .quick{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
 .qb{border:1px solid var(--bd);background:#f7f8fa;border-radius:4px;
  padding:6px 12px;font-size:clamp(13px,1vw,15px);cursor:pointer;font-variant-numeric:tabular-nums}
+.mini{display:inline-block;padding:0 5px;border-radius:9px;font-size:11px;
+ border:1px solid var(--bd2);color:var(--dim);background:#fafbfc;margin-left:4px}
 
 table{width:100%;border-collapse:collapse;font-size:clamp(13px,1vw,15px)}
 th{text-align:left;background:var(--head);color:#3d4654;font-weight:600;
@@ -148,6 +150,32 @@ tr.sel{background:#f3f7fd}
         <div class="ph">玩法 <span>多选取交集；和生肖之间也取交</span></div>
         <div class="pad" id="playzone"></div>
       </div>
+      <div class="panel" style="margin-top:10px">
+        <div class="ph">生肖注（平特 / 连肖 / 二中二） <span>整肖的钱不进号码盘</span></div>
+        <div class="pad">
+          <div class="seg" id="zxMode" style="display:flex;width:fit-content">
+            <button data-m="pt" class="on">平特</button>
+            <button data-m="lx">连肖</button>
+            <button data-m="zh2">二中二</button>
+            <button data-m="zh3">三中三</button>
+          </div>
+          <div class="seg" id="zxLen" style="display:none;width:fit-content;margin-top:8px">
+            <button data-l="2">2连</button>
+            <button data-l="3">3连</button>
+            <button data-l="4">4连</button>
+            <button data-l="5">5连</button>
+          </div>
+          <div class="seg" id="zxSplit" style="display:flex;width:fit-content;margin-top:8px">
+            <button data-s="share" class="on">共（分摊到每个肖）</button>
+            <button data-s="each">各（每个肖各这么多）</button>
+          </div>
+          <div class="zrow" id="zxRow" style="margin-top:9px"></div>
+          <div style="display:flex;align-items:center;gap:9px;margin-top:10px">
+            <div class="hint" id="zxHint" style="margin:0;flex:1">点生肖；平特可多选</div>
+            <button class="btn pri" id="zxAdd" disabled>加入生肖注</button>
+          </div>
+        </div>
+      </div>
       <div class="hint" id="hint">点号码 / 生肖 / 玩法；填的金额＝每个号各多少</div>
     </div>
 
@@ -193,6 +221,10 @@ tr.sel{background:#f3f7fd}
 let META = null;
 let S = { nums: new Set(), z: new Set(), p: new Set() };
 let NOTES = [];
+
+/* 生肖注（平特 / 连肖 / 二中二 / 三中三）：界面先上，记账功能等规则确认后再接 */
+const ZORDER = ["鼠","牛","虎","兔","龙","蛇","马","羊","猴","鸡","狗","猪"];
+let ZX = { mode: "pt", split: "share", len: 2, z: new Set() };
 let CUR = new Set();          // 当前条件算出来的号（由服务端返回）
 let MKT = "MO";
 let selRow = -1;
@@ -233,7 +265,7 @@ async function boot() {
   // 对象
   $("whoList").innerHTML = (META.chats || []).map(c => `<option value="${c.replace(/"/g, "&quot;")}">`).join("");
 
-  renderNums(); renderZ(); renderPlays();
+  renderNums(); renderZ(); renderPlays(); renderZx();
   poke();
 }
 
@@ -276,6 +308,122 @@ function renderPlays() {
       poke();
     };
   });
+}
+
+/* ---------- 生肖注 ---------- */
+function renderZx() {
+  $("zxRow").innerHTML = ZORDER.map(z =>
+    `<div class="zb" data-z="${z}">${z}</div>`).join("");
+  $("zxRow").querySelectorAll(".zb").forEach(el => {
+    el.onclick = () => {
+      const k = el.dataset.z;
+      if (ZX.z.has(k)) ZX.z.delete(k); else ZX.z.add(k);
+      paintZx();
+    };
+  });
+  paintZx();
+}
+
+function zxSet() {
+  const picked = ZORDER.filter(z => ZX.z.has(z));
+  if (ZX.mode === "lx" && picked.length) {
+    const i = ZORDER.indexOf(picked[0]);
+    const n = Math.max(2, ZX.len);
+    return Array.from({ length: n }, (_, k) => ZORDER[(i + k) % 12]);
+  }
+  return picked;
+}
+
+function zxCalc() {
+  const zs = zxSet();
+  const amt = Number($("amt").value || 0);
+  if (ZX.mode === "zh2" || ZX.mode === "zh3") {
+    const need = ZX.mode === "zh2" ? 2 : 3;
+    return { zs: zs, per: null, need: need,
+             total: zs.length >= need ? amt : 0 };
+  }
+  const n = zs.length;
+  if (!n || !(amt > 0)) return { zs: zs, per: null, total: 0 };
+  if (ZX.split === "each") {
+    const per = {}; zs.forEach(z => { per[z] = amt; });
+    return { zs: zs, per: per, total: Math.round(amt * n * 100) / 100 };
+  }
+  const each = Math.floor(amt / n * 100) / 100;
+  const per = {}; zs.forEach(z => { per[z] = each; });
+  per[zs[0]] = Math.round((amt - each * (n - 1)) * 100) / 100;   // 余数给第一个肖
+  let t = 0; zs.forEach(z => { t += per[z]; });
+  return { zs: zs, per: per, total: Math.round(t * 100) / 100 };
+}
+
+function zxName() {
+  return { pt: "平特", lx: ZX.len + "连肖", zh2: "二中二", zh3: "三中三" }[ZX.mode];
+}
+
+function paintZx() {
+  $("zxRow").querySelectorAll(".zb").forEach(el =>
+    el.classList.toggle("on", ZX.z.has(el.dataset.z)));
+  $("zxLen").style.display = ZX.mode === "lx" ? "flex" : "none";
+  $("zxLen").querySelectorAll("button").forEach(b =>
+    b.classList.toggle("on", Number(b.dataset.l) === Number(ZX.len)));
+  $("zxSplit").querySelectorAll("button").forEach(b =>
+    b.classList.toggle("on", b.dataset.s === ZX.split));
+  $("zxMode").querySelectorAll("button").forEach(b =>
+    b.classList.toggle("on", b.dataset.m === ZX.mode));
+
+  const c = zxCalc();
+  const h = $("zxHint");
+  const add = $("zxAdd");
+  const need = c.need || 0;
+  if (!c.zs.length) {
+    h.className = "hint";
+    h.textContent = (ZX.mode === "zh2" || ZX.mode === "zh3")
+      ? ("点 " + need + " 个生肖（" + zxName() + "）")
+      : (ZX.mode === "lx"
+          ? ("点一个生肖，从它往后连 " + ZX.len + " 个")
+          : "点生肖；平特可多选（共＝分摊，各＝每肖各这么多）");
+    add.disabled = true;
+    return;
+  }
+  if (need && c.zs.length < need) {
+    h.className = "hint warn";
+    h.textContent = zxName() + " 要选 " + need + " 个肖";
+    add.disabled = true;
+    return;
+  }
+  if (!(Number($("amt").value || 0) > 0)) {
+    h.className = "hint";
+    h.textContent = zxName() + " " + c.zs.join("+") + " → 在右边填金额";
+    add.disabled = true;
+    return;
+  }
+  h.className = "hint ok";
+  h.textContent = c.per
+    ? (zxName() + " " + c.zs.join("+") + " → 每肖 " + money(c.per[c.zs[0]])
+       + "，共 " + money(c.total) + " 元")
+    : (zxName() + " " + c.zs.join("+") + " → 整注 " + money(c.total)
+       + " 元（6 个平特号同时有 " + c.zs.join("、") + "）");
+  add.disabled = false;
+}
+
+function zxAddNote() {
+  const c = zxCalc();
+  if (!c.zs.length) return toast("先选生肖", "bad");
+  if (c.need && c.zs.length < c.need) return toast(zxName() + " 要选 " + c.need + " 个肖", "bad");
+  if (!(Number($("amt").value || 0) > 0)) return toast("先在右边填金额", "bad");
+  const vals = c.per ? c.zs.map(z => c.per[z]) : [];
+  const same = vals.length && vals.every(v => Math.abs(v - vals[0]) < 1e-9);
+  const eachTxt = c.per
+    ? (same ? "每肖 " + money(vals[0]) : "分摊 " + vals.map(v => money(v)).join("/"))
+    : "整注";
+  NOTES.push({
+    zx: true, text: "", label: zxName() + " " + c.zs.join("+"),
+    nums: [], each: (c.per ? c.per[c.zs[0]] : c.total),
+    eachTxt: eachTxt, total: c.total, zodiacs: c.zs
+  });
+  ZX.z = new Set();
+  $("amt").value = "";
+  paintZx(); renderNotes();
+  toast("生肖注已进清单（记账功能还没接，先核对金额和肖）", "ok");
 }
 
 /* ---------- 条件变了：问服务端算号（不在前端自己算） ---------- */
@@ -365,12 +513,12 @@ function renderNotes() {
     selRow = -1;
   } else {
     box.innerHTML = `<table><thead><tr>
-      <th style="width:34px">#</th><th>内容</th><th class="tr" style="width:70px">每号</th>
+      <th style="width:34px">#</th><th>内容</th><th class="tr" style="width:110px">每号 / 每肖</th>
       <th class="tr" style="width:86px">合计</th><th style="width:26px"></th></tr></thead><tbody>
       ${NOTES.map((n, i) => `<tr data-i="${i}" class="${i === selRow ? "sel" : ""}">
         <td class="n">${i + 1}</td>
-        <td class="item">${n.label}</td>
-        <td class="n">${money(n.each)}</td>
+        <td class="item">${n.label}${n.zx ? ' <span class="mini">生肖注</span>' : ""}</td>
+        <td class="n">${n.eachTxt || money(n.each)}</td>
         <td class="n"><b>${money(n.total)}</b></td>
         <td><span class="row-x" data-x="${i}">×</span></td></tr>`).join("")}
       </tbody></table>`;
@@ -392,14 +540,20 @@ function renderNotes() {
   }
   const total = NOTES.reduce((a, n) => a + n.total, 0);
   const cnt = NOTES.reduce((a, n) => a + n.nums.length, 0);
+  const zxn = NOTES.filter(n => n.zx).length;
   $("sumBig").textContent = money(total);
-  $("sumSub").textContent = "元 / " + cnt + " 个号 / " + NOTES.length + " 注";
+  $("sumSub").textContent = "元 / " + cnt + " 个号 / " + NOTES.length + " 注"
+    + (zxn ? "（含生肖注 " + zxn + " 注）" : "");
   $("okBtn").disabled = !NOTES.length || !($("who").value || "").trim();
 }
 
 /* ---------- 记账 ---------- */
 async function submit() {
   if (!NOTES.length) return toast("清单是空的", "bad");
+  if (NOTES.some(n => n.zx)) {
+    /* 规则还没接：宁可拦住，也不能把这些钱记错或漏掉 */
+    return toast("生肖注还没接通记账（等规则确认后再开）。先把这几注删掉，或单独记号码注", "bad");
+  }
   const chat = ($("who").value || "").trim();
   if (!chat) { toast("填一下挂在谁名下", "bad"); $("who").focus(); return; }
   const total = NOTES.reduce((a, n) => a + n.total, 0);
@@ -435,6 +589,16 @@ $("mktSeg").querySelectorAll("button").forEach(b => {
   };
 });
 $("addBtn").onclick = addNote;
+$("zxAdd").onclick = zxAddNote;
+$("zxMode").querySelectorAll("button").forEach(b => {
+  b.onclick = () => { ZX.mode = b.dataset.m; paintZx(); };
+});
+$("zxLen").querySelectorAll("button").forEach(b => {
+  b.onclick = () => { ZX.len = Number(b.dataset.l); paintZx(); };
+});
+$("zxSplit").querySelectorAll("button").forEach(b => {
+  b.onclick = () => { ZX.split = b.dataset.s; paintZx(); };
+});
 $("okBtn").onclick = submit;
 $("clearBtn").onclick = () => {
   if (!NOTES.length) return;
@@ -445,7 +609,7 @@ document.querySelectorAll(".qb").forEach(b => {
   b.onclick = () => { $("amt").value = b.dataset.a; showHint({ ok: CUR.size > 0 }); $("amt").focus(); };
 });
 $("amt").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addNote(); } });
-$("amt").addEventListener("input", () => showHint({ ok: CUR.size > 0 }));
+$("amt").addEventListener("input", () => { showHint({ ok: CUR.size > 0 }); paintZx(); });
 $("who").addEventListener("input", () => { $("okBtn").disabled = !NOTES.length || !($("who").value || "").trim(); });
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); submit(); }

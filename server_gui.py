@@ -2153,6 +2153,10 @@ class ManualBetDialog(tk.Toplevel):
         self.sel_nums = set()           # 直接点的号
         self.sel_z = set()              # 生肖（并集）
         self.sel_p = set()              # 玩法（交集）
+        self.zx_mode = "pt"             # 生肖注：pt 平特 / lx 连肖 / zh2 二中二 / zh3 三中三
+        self.zx_split = "share"         # 生肖注：share 共（分摊） / each 各
+        self.zx_len = 2                 # 连肖位数
+        self.sel_zx = set()             # 生肖注选中的生肖（跟号码盘的生肖分开）
         self._pn = {}                   # 玩法写法 → 号码集合，缓存
         self._num_lb = {}
         self._num_bg = {}
@@ -2457,6 +2461,77 @@ class ManualBetDialog(tk.Toplevel):
                 self._fw.append((b, "small"))
             for c in range(cols):
                 gf.grid_columnconfigure(c, weight=1)
+
+        # ---- 生肖注：平特 / 连肖 / 二中二 / 三中三 ----
+        # 先做界面。记账功能等口径确认后再接，现在加入清单只做核对。
+        tk.Frame(self.ops, bg=CLR_LINE, height=1).pack(fill="x", padx=12, pady=(12, 0))
+        self._lbl(self.ops, "生肖注（平特 / 连肖 / 二中二 / 三中三）", "small",
+                  bg=CLR_CARD, fg=CLR_MUTED
+                  ).pack(anchor="w", padx=12, pady=(8, 0))
+        self._lbl(self.ops, "整肖的钱不摊进上面的号码盘", "tiny",
+                  bg=CLR_CARD, fg="#9aa3af").pack(anchor="w", padx=12, pady=(0, 4))
+
+        zxrow = tk.Frame(self.ops, bg=CLR_CARD)
+        zxrow.pack(fill="x", padx=12)
+        self._zx_mode_lb = {}
+        for code, disp in (("pt", "平特"), ("lx", "连肖"),
+                           ("zh2", "二中二"), ("zh3", "三中三")):
+            b = tk.Label(zxrow, text=disp, font=self._font("small"), bg="#eef0f3",
+                         fg="#374151", padx=6, pady=3, cursor="hand2")
+            b.pack(side="left", padx=(0, 4))
+            b.bind("<Button-1>", lambda e, k=code: self._pick_zx_mode(k))
+            self._zx_mode_lb[code] = b
+            self._fw.append((b, "small"))
+
+        self.zx_len_row = tk.Frame(self.ops, bg=CLR_CARD)
+        self._zx_len_lb = {}
+        self._lbl(self.zx_len_row, "连肖位数", "tiny", bg=CLR_CARD, fg="#9aa3af").pack(side="left")
+        for n in (2, 3, 4, 5):
+            b = tk.Label(self.zx_len_row, text="%d连" % n, font=self._font("tiny"),
+                         bg="#eef0f3", fg="#374151", padx=5, pady=2, cursor="hand2")
+            b.pack(side="left", padx=(4, 0))
+            b.bind("<Button-1>", lambda e, x=n: self._pick_zx_len(x))
+            self._zx_len_lb[n] = b
+            self._fw.append((b, "tiny"))
+
+        sprow = tk.Frame(self.ops, bg=CLR_CARD)
+        sprow.pack(fill="x", padx=12, pady=(6, 0))
+        self._zx_sp_lb = {}
+        for code, disp in (("share", "共（分摊到每个肖）"), ("each", "各（每个肖各这么多）")):
+            b = tk.Label(sprow, text=disp, font=self._font("tiny"), bg="#eef0f3",
+                         fg="#374151", padx=6, pady=2, cursor="hand2")
+            b.pack(side="left", padx=(0, 4))
+            b.bind("<Button-1>", lambda e, k=code: self._pick_zx_split(k))
+            self._zx_sp_lb[code] = b
+            self._fw.append((b, "tiny"))
+
+        zxg = tk.Frame(self.ops, bg=CLR_CARD)
+        zxg.pack(fill="x", padx=12, pady=(6, 0))
+        self._zxz_lb = {}
+        for i, rowd in enumerate(self.grid):
+            z = rowd["zodiac"]
+            r, c = divmod(i, 6)
+            b = tk.Label(zxg, text=z, font=self._font("small"), bg="#eef0f3",
+                         fg="#374151", padx=6, pady=3, cursor="hand2")
+            b.grid(row=r, column=c, padx=2, pady=2, sticky="ew")
+            b.bind("<Button-1>", lambda e, x=z: self._pick_zx(x))
+            self._zxz_lb[z] = b
+            self._fw.append((b, "small"))
+        for c in range(6):
+            zxg.grid_columnconfigure(c, weight=1)
+
+        self.lb_zx = self._lbl(self.ops, "", "tiny", bg=CLR_CARD, fg="#6b7280",
+                               anchor="w", justify="left", wraplength=430)
+        self.lb_zx.pack(fill="x", padx=12, pady=(6, 0))
+
+        zxbar = tk.Frame(self.ops, bg=CLR_CARD)
+        zxbar.pack(fill="x", padx=12, pady=(4, 8))
+        self.btn_zx = tk.Button(zxbar, text="加入生肖注", font=self._font("small"),
+                                bg=CLR_BLUE2, fg="white", relief="flat", bd=0,
+                                width=9, cursor="hand2", command=self._zx_add)
+        self.btn_zx.pack(side="left")
+        self._fw.append((self.btn_zx, "small"))
+
         tk.Frame(self.ops, bg=CLR_CARD, height=10).pack(fill="x")
 
         # ---- 清单 ----
@@ -2531,6 +2606,12 @@ class ManualBetDialog(tk.Toplevel):
         self.bind("<Control-Return>", lambda e: self._submit())
         self.bind("<Configure>", self._on_conf)
         self._bind_wheel(self.ops)
+        # 金额一改，生肖注的预览跟着走
+        try:
+            self.v_amt.trace_add("write", lambda *a: self._zx_prev())
+        except Exception:
+            pass
+        self._zx_prev()
 
     def _bind_wheel(self, w):
         """滚轮事件只管给 Canvas，鼠标在生肖/玩法按钮上也要能滚。"""
@@ -2576,6 +2657,155 @@ class ManualBetDialog(tk.Toplevel):
         else:
             self.sel_p.add(k)
         self._repaint()
+
+    # ---------- 生肖注（平特 / 连肖 / 二中二 / 三中三） ----------
+    def _pick_zx_mode(self, k):
+        self.zx_mode = k
+        if k == "lx":
+            self.zx_len_row.pack(fill="x", padx=12, pady=(6, 0))
+        else:
+            self.zx_len_row.pack_forget()
+        self._zx_prev()
+
+    def _pick_zx_len(self, n):
+        self.zx_len = int(n)
+        self._zx_prev()
+
+    def _pick_zx_split(self, k):
+        self.zx_split = k
+        self._zx_prev()
+
+    def _pick_zx(self, z):
+        if z in self.sel_zx:
+            self.sel_zx.discard(z)
+        else:
+            self.sel_zx.add(z)
+        self._zx_prev()
+
+    def _zx_row_order(self):
+        """生肖按钮的排列顺序（跟号码盘的行序一致，方便对着看）。"""
+        return [rowd["zodiac"] for rowd in self.grid] if self.grid else []
+
+    def _zx_name(self):
+        return {"pt": "平特", "lx": "%d连肖" % int(self.zx_len or 2),
+                "zh2": "二中二", "zh3": "三中三"}.get(self.zx_mode, "平特")
+
+    def _zx_set(self):
+        """这一注涉及哪几个肖。连肖只点一个肖时，按传统生肖序往后补。
+
+        排列用传统序（鼠牛虎兔龙蛇马羊猴鸡狗猪），跟客户写 "鼠牛" 的习惯一致，
+        不跟号码盘的行序（马蛇龙…）走，否则会显示成 "牛+鼠"。
+        """
+        trad = self._order() or self._zx_row_order()
+        picked = [z for z in trad if z in self.sel_zx]
+        for z in self._zx_row_order():
+            if z in self.sel_zx and z not in picked:
+                picked.append(z)
+        if self.zx_mode == "lx" and picked:
+            start = picked[0]
+            n = max(2, int(self.zx_len or 2))
+            out = []
+            if start in trad:
+                i = trad.index(start)
+                out = [trad[(i + k) % len(trad)] for k in range(n)]
+            return out or picked[:n]
+        return picked
+
+    def _zx_calc(self):
+        """返回 (生肖列表, 每肖金额, 总额)。组合注每肖金额为空，只给整注。"""
+        zs = self._zx_set()
+        amt = self._read_amt()
+        if not zs or amt is None:
+            return None, {}, 0.0
+        if self.zx_mode in ("zh2", "zh3"):
+            need = 2 if self.zx_mode == "zh2" else 3
+            if len(zs) < need:
+                return None, {}, 0.0
+            return zs[:need], {}, round(amt, 2)
+        n = len(zs)
+        if self.zx_split == "each":
+            return zs, {z: amt for z in zs}, round(amt * n, 2)
+        # 共：抹到分，余数给第一个肖
+        each = round(float(int(amt / n * 100)) / 100.0, 2)
+        per = {z: each for z in zs}
+        per[zs[0]] = round(amt - each * (n - 1), 2)
+        return zs, per, round(sum(per.values()), 2)
+
+    def _zx_prev(self):
+        try:
+            for k, b in self._zx_mode_lb.items():
+                on = (k == self.zx_mode)
+                b.configure(bg="#dbeafe" if on else "#eef0f3",
+                            fg="#1e40af" if on else "#374151")
+            for n2, b in self._zx_len_lb.items():
+                on = (n2 == self.zx_len)
+                b.configure(bg="#dbeafe" if on else "#eef0f3",
+                            fg="#1e40af" if on else "#374151")
+            for k, b in self._zx_sp_lb.items():
+                on = (k == self.zx_split)
+                b.configure(bg="#dbeafe" if on else "#eef0f3",
+                            fg="#1e40af" if on else "#374151")
+            for z, b in self._zxz_lb.items():
+                on = (z in self.sel_zx)
+                b.configure(bg="#fde68a" if on else "#eef0f3",
+                            fg="#92400e" if on else "#374151")
+        except Exception:
+            pass
+        if not hasattr(self, "lb_zx"):
+            return
+        zs, per, total = self._zx_calc()
+        if not zs:
+            if self.zx_mode in ("zh2", "zh3"):
+                need = 2 if self.zx_mode == "zh2" else 3
+                msg = "%s 要选 %d 个肖" % (self._zx_name(), need)
+            elif self.zx_mode == "lx":
+                msg = "点一个生肖，按传统生肖序往后连 %d 个" % int(self.zx_len or 2)
+            else:
+                msg = "点生肖；平特可多选（共＝分摊，各＝每肖各这么多）"
+            try:
+                self.lb_zx.configure(text=msg)
+            except Exception:
+                pass
+            return
+        txt = "%s %s" % (self._zx_name(), "+".join(zs))
+        if total <= 0:
+            txt += " → 填金额"
+        elif per:
+            txt += " → 每肖 %s，共 %s" % (self._amt_str(per[zs[0]]), self._amt_str(total))
+        else:
+            txt += " → 整注 %s（6 个平特号同时有 %s）" % (
+                self._amt_str(total), "、".join(zs))
+        try:
+            self.lb_zx.configure(text=txt)
+        except Exception:
+            pass
+
+    def _zx_add(self):
+        if self._busy:
+            return
+        zs, per, total = self._zx_calc()
+        if not zs:
+            return self._say("生肖注：先在下面选生肖、填金额")
+        if total <= 0:
+            return self._say("金额写个数字，比如 50")
+        if per:
+            vals = [round(per[z], 2) for z in zs]
+            each_txt = ("每肖 %s" % self._amt_str(vals[0]) if len(set(vals)) == 1
+                        else "分摊 " + "/".join(self._amt_str(per[z]) for z in zs))
+        else:
+            each_txt = "整注"
+        self.notes.append({
+            "zx": True, "text": "", "label": "%s %s" % (self._zx_name(), "+".join(zs)),
+            "nums": [], "each": (per[zs[0]] if per else total),
+            "each_txt": each_txt, "total": round(total, 2),
+            "zx_mode": self.zx_mode, "zodiacs": list(zs), "per": dict(per),
+        })
+        self.sel_zx = set()
+        self.v_amt.set("")
+        self._zx_prev()
+        self._refresh_list()
+        self._say("生肖注已进清单（记账功能还没接，先核对金额和肖）", CLR_OK)
+        self.en_amt.focus_set()
 
     def _quick_amt(self, v):
         self.v_amt.set(v)
@@ -2701,13 +2931,17 @@ class ManualBetDialog(tk.Toplevel):
         for iid in self.tv.get_children():
             self.tv.delete(iid)
         for i, n in enumerate(self.notes):
+            each = n.get("each_txt") or self._amt_str(n["each"])
             self.tv.insert("", "end", iid=str(i), values=(
-                "%d. %s" % (i + 1, n["label"]),
-                self._amt_str(n["each"]), fmt_money(n["total"])))
+                "%d. %s" % (i + 1, n["label"]), each, fmt_money(n["total"])))
         total = sum(n["total"] for n in self.notes)
         cnt = sum(len(n["nums"]) for n in self.notes)
-        self.lb_total.configure(text="合计 %s 元 / %d 个号 / %d 注"
-                                % (fmt_money(total), cnt, len(self.notes)))
+        zx_n = sum(1 for n in self.notes if n.get("zx"))
+        txt = "合计 %s 元 / %d 个号 / %d 注" % (
+            fmt_money(total), cnt, len(self.notes))
+        if zx_n:
+            txt += "（含生肖注 %d 注）" % zx_n
+        self.lb_total.configure(text=txt)
         self._refresh_foot()
 
     def _refresh_foot(self):
@@ -2805,6 +3039,11 @@ class ManualBetDialog(tk.Toplevel):
     def _submit(self):
         if self._busy or not self.notes:
             return
+        if any(n.get("zx") for n in self.notes):
+            # 界面先上，规则还没接：宁可拦住，也不能把这部分钱记错或漏掉
+            self._say("生肖注还没接通记账（等你确认规则后再开）。"
+                      "先把这几注删掉，或单独记号码注", CLR_BAD)
+            return
         chat = (self.v_chat.get() or "").strip()
         if not chat:
             self._say("填一下挂在谁名下")
@@ -2892,6 +3131,12 @@ class ManualBetDialog(tk.Toplevel):
         self.sel_p = {"大", "单"}
         self._repaint()
         self._add()
+        self.zx_mode = "pt"
+        self.zx_split = "share"
+        self.sel_zx = {"鼠", "牛"}
+        self.v_amt.set("100")
+        self._zx_prev()
+        self._zx_add()
         self._say("")
 
 
