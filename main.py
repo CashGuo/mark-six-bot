@@ -1951,7 +1951,9 @@ def recalc_account(account=None) -> dict:
 
 # ---- 白名单条目的两个可选把关：有效期、来源 IP ----
 # 这两个检查都在服务端做，客户把客户端本地校验拆了也没用。
-EXPIRE_GRACE_DAYS = 3          # 容忍客户机时间不准，到期后再多给 3 天
+# 到期就断，不留缓冲：有效期至 2027-11-16，那就到 2027-11-16 当天为止，
+# 次日 00:00 起一律拒收。服务端自己按本机日期算，跟客户机的时间无关。
+EXPIRE_GRACE_DAYS = 0
 
 
 def _allow_ip_list(text) -> List[str]:
@@ -1981,7 +1983,13 @@ def ip_allowed(it: Dict[str, object], ip: str) -> bool:
 
 
 def client_expired(it: Dict[str, object], now=None) -> bool:
-    """expire_at 为空 = 不限期（老条目兼容）；到期后不接受任何推送。"""
+    """expire_at 为空 = 不限期（老条目兼容）；到期后不接受任何推送。
+
+    界面「新增」的默认值是 9999-12-31（也就是不限期）。这个日期本身能 parse，
+    但再加 3 天就超出 date 的上限 —— date(9999,12,31) + timedelta(3) 直接
+    OverflowError，会让**每一次推送**都 500。所以容差那步单独兜住：加不上就是
+    已经到天了，当作不限期。
+    """
     exp = str(it.get("expire_at") or "").strip()
     if not exp:
         return False
@@ -1990,7 +1998,11 @@ def client_expired(it: Dict[str, object], now=None) -> bool:
     except ValueError:
         return False
     today = (now or datetime.now()).date()
-    return today > d + timedelta(days=EXPIRE_GRACE_DAYS)
+    try:
+        limit = d + timedelta(days=EXPIRE_GRACE_DAYS)
+    except OverflowError:
+        return False                         # 日期大到加不动 = 等于不限期
+    return today > limit
 
 
 def secret_for(wechat: str, ip: str = "") -> str:
