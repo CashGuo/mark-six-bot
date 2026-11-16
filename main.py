@@ -35,6 +35,7 @@ import shutil
 import sys
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -1189,6 +1190,53 @@ def unmark_fingerprint(fp: str) -> bool:
 _load_fingerprints()
 
 
+# ======================== 回执补发（采集端超时后重新来取）========================
+#
+# 采集端 pusher 的 timeout 只有 8 秒，而一条要走大模型的消息可能要十几秒。
+# 第一次请求超时后采集端会重推同一条 —— 那时 msg_id 已经被 claim 挡住，
+# 走的是"重复推送，跳过"分支，原来那条回执就再也发不出去了：
+# 账记上了，客户却没收到"已记账 ¥200"。
+#
+# 所以每个 msg_id 的回执在这里留一份：
+#   还在算  → 告诉采集端 pending，让它稍后再来（别当成功走掉）
+#   算完了  → 把当初没收到的回执直接补给它
+# 只留最近几百条，够覆盖采集端的重试窗口（退避最长 300 秒 × 8 次）。
+
+_REPLY_LOCK = threading.Lock()
+_reply_cache: "OrderedDict[str, dict]" = OrderedDict()
+_REPLY_CACHE_MAX = 500
+_pending_msgs = set()
+
+
+def mark_pending(msg_id: str):
+    with _REPLY_LOCK:
+        _pending_msgs.add(msg_id)
+
+
+def clear_pending(msg_id: str):
+    with _REPLY_LOCK:
+        _pending_msgs.discard(msg_id)
+
+
+def cache_reply(msg_id: str, reply: dict):
+    with _REPLY_LOCK:
+        _reply_cache[msg_id] = reply
+        _reply_cache.move_to_end(msg_id)
+        while len(_reply_cache) > _REPLY_CACHE_MAX:
+            _reply_cache.popitem(last=False)
+
+
+def fetch_reply_state(msg_id: str) -> Tuple[str, dict]:
+    """重推时问一句：这条还在算吗？算完了当初的回执是什么？
+
+    返回 ("pending", None) / ("done", 回执或 None)。
+    """
+    with _REPLY_LOCK:
+        if msg_id in _pending_msgs:
+            return "pending", None
+        return "done", _reply_cache.get(msg_id)
+
+
 # ======================== 消息流水（客户要看"到底收到了什么"） ========================
 #
 # 和采集端的 messages_*.log 是一对：那边记"我采到了它"，这边记"我拿它干了什么"。
@@ -2034,7 +2082,13 @@ def _allow_ip_list(text) -> List[str]:
 
 
 def ip_allowed(it: Dict[str, object], ip: str) -> bool:
-    """条目没填 ip_allow = 全放行；填了就只认列出来的 IP 或 CIDR。"""
+    """条目没填 ip_allow = 全放行；填了就只认列出来的 IP 或 CIDR。
+
+    本机回环单独当一家人：服务端和采集端装在同一个电脑上时最常见，
+    采集端填 `localhost` 可能被解析成 IPv6 的 ::1，也可能落到 127.0.0.1，
+    取决于服务端监听的是 IPv4 还是双栈。客户不该为了这个去猜地址族，
+    所以 127.0.0.1 / ::1 / localhost 三种写法互相都认。
+    """
     allow = _allow_ip_list(it.get("ip_allow"))
     if not allow:
         return True
@@ -2043,12 +2097,27 @@ def ip_allowed(it: Dict[str, object], ip: str) -> bool:
     except ValueError:
         return False               # 拿不到来源 IP（或格式不对）一律不能放进白名单之外
     for item in allow:
+        low = item.strip().lower()
+        if low in ("localhost", "loopback"):
+            if addr.is_loopback:
+                return True        # 写 localhost = 只收本机
+            continue
         try:
             if "/" in item:
-                if addr in ipaddress.ip_network(item, strict=False):
+                net = ipaddress.ip_network(item, strict=False)
+                if addr in net:
                     return True
-            elif addr == ipaddress.ip_address(item):
-                return True
+                # 127.0.0.0/8 这类回环网段：::1 天然不在里面，单独补上
+                if addr.is_loopback and net.network_address.is_loopback \
+                        and net.broadcast_address.is_loopback:
+                    return True
+            else:
+                item_addr = ipaddress.ip_address(item)
+                if addr == item_addr:
+                    return True
+                # 写 127.0.0.1、来源是 ::1（或反过来）也是同一个本机
+                if addr.is_loopback and item_addr.is_loopback:
+                    return True
         except ValueError:
             continue               # 某一条写错了不影响其它条目，别整条白名单失效
     return False
@@ -2242,6 +2311,9 @@ def wx_hook():
     # 客户发的是下注内容，回一句「收到」就是确认动作；没记上账还回「收到」
     # 等于骗人，比不回更糟。
     replies: List[dict] = []
+    # 重推时补发给采集端的：算完了的回执（当初那次超时没送到）和还在算的消息号
+    replay_replies: List[dict] = []
+    pending_ids: List[str] = []
 
     def _row(m, result, reason="", acc="", amount=None):
         """一条流水。跳过的行没有落定账号，account 留空，界面退回显示微信号。"""
@@ -2266,80 +2338,112 @@ def wx_hook():
             msg_rows.append(_row(m, "跳过", "缺 msg_id"))
             continue
         if not claim_message(msg_id):
+            # 大概率是采集端上次请求超时后的重推。分三种情况：
+            #   还在算   → 让它别当成功，退避后再来（不记流水，不然列表全是重复噪音）
+            #   算完了   → 把当初那份回执补给它，客户这次才能收到回复
+            #   早处理完且缓存过期 → 只能算了（真重复，前面已经回过）
+            state, cached = fetch_reply_state(msg_id)
+            if state == "pending":
+                pending_ids.append(msg_id)
+                continue
             skipped += 1
             msg_rows.append(_row(m, "跳过", "重复推送"))
+            if cached:
+                replay_replies.append(cached)
             continue
 
-        mtype = str(m.get("msg_type") or "")
-        if mtype in SKIP_TYPES:
-            skipped += 1
-            msg_rows.append(_row(m, "跳过", "不记账的会话"))
-            continue
-        if mtype and mtype not in TEXT_TYPES:
-            skipped += 1                      # 图片/文件等暂不记账
-            msg_rows.append(_row(m, "跳过", "不是文字（%s）" % mtype))
-            continue
+        # 从这里开始算「处理中」，重推的请求会被上面判成 pending
+        mark_pending(msg_id)
+        try:
+            mtype = str(m.get("msg_type") or "")
+            if mtype in SKIP_TYPES:
+                skipped += 1
+                msg_rows.append(_row(m, "跳过", "不记账的会话"))
+                continue
+            if mtype and mtype not in TEXT_TYPES:
+                skipped += 1                      # 图片/文件等暂不记账
+                msg_rows.append(_row(m, "跳过", "不是文字（%s）" % mtype))
+                continue
 
-        content = (m.get("content") or "").strip()
-        # 采集端空内容会补成 "[图片]" 这类占位符，直接跳过，别浪费 AI 额度
-        if not content or (len(content) <= 12 and content.startswith("[") and content.endswith("]")):
-            skipped += 1
-            msg_rows.append(_row(m, "跳过", "没内容"))
-            continue
+            content = (m.get("content") or "").strip()
+            # 采集端空内容会补成 "[图片]" 这类占位符，直接跳过，别浪费 AI 额度
+            if not content or (len(content) <= 12 and content.startswith("[")
+                               and content.endswith("]")):
+                skipped += 1
+                msg_rows.append(_row(m, "跳过", "没内容"))
+                continue
 
-        acc = resolve_account(m.get("account") or default_acc)
-        # 同一群被两个微信号同时监听时：msg_id 各自独立，靠内容指纹挡第二份
-        fp = msg_fingerprint(str(m.get("target_id") or m.get("chat_id") or ""),
-                             m.get("create_time"), str(m.get("sender") or ""), content)
-        if not claim_fingerprint(fp):
-            logger.info(f"[跨账号重复] {acc} {content[:40]}")
-            skipped += 1
-            msg_rows.append(_row(m, "跳过", "另一个号已经收过", acc=acc))
-            continue
+            acc = resolve_account(m.get("account") or default_acc)
+            # 同一群被两个微信号同时监听时：msg_id 各自独立，靠内容指纹挡第二份
+            fp = msg_fingerprint(str(m.get("target_id") or m.get("chat_id") or ""),
+                                 m.get("create_time"), str(m.get("sender") or ""), content)
+            if not claim_fingerprint(fp):
+                logger.info(f"[跨账号重复] {acc} {content[:40]}")
+                skipped += 1
+                msg_rows.append(_row(m, "跳过", "另一个号已经收过", acc=acc))
+                continue
 
-        accepted += 1
-        r = record_bet(content, msg_id, m.get("chat_name") or "", str(m.get("sender") or ""),
-                       str(m.get("sender_name") or ""), account=acc,
-                       fp=fp, chat_id=str(m.get("target_id") or m.get("chat_id") or ""),
-                       create_time=m.get("create_time"))
-        # 指纹在解析前就占住了（不占的话同一条内容可能被两个号各记一笔）；
-        # 解析失败要放回去，让另一个号 / 重推还能重新走一遍。
-        if r.get("ok"):
-            recorded += 1
-            msg_rows.append(_row(m, "记账", "¥%s" % r.get("total"), acc=acc,
-                                 amount=r.get("total")))
-            # 回复文案在这里定，采集端只负责发、不拼文案：
-            # 金额和号码数都是服务端算出来的，采集端拿不到这个上下文。
-            chat = str(m.get("chat_name") or "")
-            chat_id = str(m.get("target_id") or m.get("chat_id") or "")
-            # 以前这里判的是 `if chat:` —— 群名取不到（客户刚拉群、名字还没同步）
-            # 就静默不回，账记上了但客户没收到回执。只要有一个标识就回。
-            if chat or chat_id:
-                replies.append({
-                    "msg_id": msg_id,
-                    "chat": chat or chat_id,
-                    "chat_id": chat_id,
-                    # 客户要的是"收到了、怎么算的"一句话：鼠 各50共计200。
-                    # 规则算出来的 detail 就是这个形态，模型兜底的用简单版。
-                    "text": r.get("detail") or ("已记账 ¥%s" % _fmt_money(r.get("total"))),
-                })
-        else:
-            unparsed += 1
-            # 解析失败不能把这单锁死：客户在群里重发一遍是很自然的补救，
-            # 锁住消息号就等于永久放弃这一单。消息号和指纹都放回去，
-            # 让重推（甚至另一个号重推）能重新走一遍解析。
-            unmark_message_processed(msg_id)
-            unmark_fingerprint(fp)
-            msg_rows.append(_row(m, "未解析", r.get("reason") or "解析失败", acc=acc))
+            accepted += 1
+            r = record_bet(content, msg_id, m.get("chat_name") or "",
+                           str(m.get("sender") or ""), str(m.get("sender_name") or ""),
+                           account=acc, fp=fp,
+                           chat_id=str(m.get("target_id") or m.get("chat_id") or ""),
+                           create_time=m.get("create_time"))
+            # 指纹在解析前就占住了（不占的话同一条内容可能被两个号各记一笔）；
+            # 解析失败要放回去，让另一个号 / 重推还能重新走一遍。
+            if r.get("ok"):
+                recorded += 1
+                msg_rows.append(_row(m, "记账", "¥%s" % r.get("total"), acc=acc,
+                                     amount=r.get("total")))
+                # 回复文案在这里定，采集端只负责发、不拼文案：
+                # 金额和号码数都是服务端算出来的，采集端拿不到这个上下文。
+                chat = str(m.get("chat_name") or "")
+                chat_id = str(m.get("target_id") or m.get("chat_id") or "")
+                # 以前这里判的是 `if chat:` —— 群名取不到（客户刚拉群、名字还没同步）
+                # 就静默不回，账记上了但客户没收到回执。只要有一个标识就回。
+                if chat or chat_id:
+                    reply = {
+                        "msg_id": msg_id,
+                        "chat": chat or chat_id,
+                        "chat_id": chat_id,
+                        # 客户要的是"收到了、怎么算的"一句话：鼠 各50共计200。
+                        # 规则算出来的 detail 就是这个形态，模型兜底的用简单版。
+                        "text": r.get("detail") or ("已记账 ¥%s"
+                                                    % _fmt_money(r.get("total"))),
+                    }
+                    replies.append(reply)
+                    # 万一这次响应因为超时送不到采集端，重推时还能原样再给一次
+                    cache_reply(msg_id, reply)
+            else:
+                unparsed += 1
+                # 解析失败不能把这单锁死：客户在群里重发一遍是很自然的补救，
+                # 锁住消息号就等于永久放弃这一单。消息号和指纹都放回去，
+                # 让重推（甚至另一个号重推）能重新走一遍解析。
+                unmark_message_processed(msg_id)
+                unmark_fingerprint(fp)
+                msg_rows.append(_row(m, "未解析", r.get("reason") or "解析失败", acc=acc))
+        finally:
+            # 成功、跳过、失败都要退出「处理中」：否则采集端重推永远等不到结果
+            clear_pending(msg_id)
 
     append_messages(msg_rows)
+
+    # 补发的回执排在本批新回执后面：采集端按 msg_id 各自发各自的群，顺序无所谓
+    replies.extend(replay_replies)
+    if pending_ids:
+        logger.info(f"重推时仍在处理，让采集端稍后再取：{len(pending_ids)} 条")
+    if replay_replies:
+        logger.info(f"重推补发回执：{len(replay_replies)} 条")
 
     logger.info(f"收到推送 batch={payload.get('batch_id')} 共{len(messages)}条 "
                 f"记账{recorded} 未解析{unparsed} 跳过{skipped} 微信号={wechat} acc={default_acc}")
     return jsonify({"ok": True, "count": len(messages), "recorded": recorded,
                     "unparsed": unparsed, "skipped": skipped,
                     "account": resolve_account(default_acc),
-                    "replies": replies}), 200
+                    "replies": replies,
+                    # 这些消息号服务端还在算（多半在等模型），别当成功：
+                    # 过一会儿带同样的 msg_id 再来一次，就能把回执拿走。
+                    "pending": pending_ids}), 200
 
 
 # ======================== 监听对象（可选，通用能力） ========================
