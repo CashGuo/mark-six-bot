@@ -82,7 +82,7 @@ _DEFAULT_CONFIG = """{
   "wx_skew_sec": 300,
   "llm_api_key": "",
   "llm_base_url": "https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-  "llm_model": "qwen3.8-27b",
+  "llm_model": "qwen3.8-flash",
   "llm_thinking": 0,
   "llm_timeout": 60
 }

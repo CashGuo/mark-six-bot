@@ -22,6 +22,15 @@ New-Item -ItemType Directory -Force -Path $Rel | Out-Null
 # 换版本只换 EXE，客户目录不动。
 Copy-Item -LiteralPath $Exe -Destination (Join-Path $Rel "MarkSixBot.exe") -Force
 Copy-Item -LiteralPath (Join-Path $Tpl "从这里开始.txt") -Destination (Join-Path $Rel "从这里开始.txt") -Force
+# 出厂 config 一起带上：客户机器上还没有 server.json 时，adopt_config 会把它抄到
+# 用户目录，这样默认模型名等重要项以包里的为准，而不是编译时固化在 EXE 里的旧值。
+$TplCfg = Join-Path $Tpl "config"
+if (Test-Path -LiteralPath $TplCfg) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Rel "config") | Out-Null
+    Get-ChildItem -LiteralPath $TplCfg -File | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Rel ("config\" + $_.Name)) -Force
+    }
+}
 
 # 自检：交付包里绝不能出现大模型 Key。
 # 推送密钥（wx_push_secret）是有意内置的出厂默认值 —— 它必须和采集端配对，
@@ -38,7 +47,11 @@ if ($bad.Count -gt 0) { throw ("交付包里出现了密钥文件：" + ($bad -j
 
 $zip = Join-Path $Root "build\release\MarkSixBot-Server-$Version.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-Compress-Archive -Path (Join-Path $Rel "*") -DestinationPath $zip -CompressionLevel Optimal
+# Compress-Archive 会把内容整体读进内存，37 MB 的 EXE 在这台机器上直接
+# OutOfMemoryException；.NET 的 CreateFromDirectory 是流式的，稳得多。
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[IO.Compression.ZipFile]::CreateFromDirectory(
+    $Rel, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
 
 Write-Output "[release] 目录：$Rel"
 Get-ChildItem -LiteralPath $Rel -Recurse -File |

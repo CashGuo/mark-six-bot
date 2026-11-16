@@ -37,10 +37,10 @@ python -m venv venv
 # 由 WxPushTool 厂商签发客户授权时下发的 64 位十六进制密钥
 WX_PUSH_SECRET=your_64_hex_secret_here
 
-# 任何 OpenAI 兼容端点都能用，默认是阿里云百炼的 qwen3.8-27b
+# 任何 OpenAI 兼容端点都能用，默认是阿里云百炼的 qwen3.8-flash
 LLM_API_KEY=your_api_key_here
 LLM_BASE_URL=https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-LLM_MODEL=qwen3.8-27b
+LLM_MODEL=qwen3.8-flash
 LLM_THINKING=0
 LLM_TIMEOUT=60
 

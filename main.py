@@ -207,9 +207,9 @@ def whitelist_mode() -> str:
 
 LLM_API_KEY = cfg("llm_api_key", "LLM_API_KEY") or cfg("llm_api_key", "DEEPSEEK_API_KEY")
 
-# 任意 OpenAI 兼容端点：默认指向阿里云百炼的 qwen3.8-27b
+# 任意 OpenAI 兼容端点：默认指向阿里云百炼的 qwen3.8-flash
 LLM_BASE_URL = cfg("llm_base_url", "LLM_BASE_URL", DEFAULT_LLM_BASE)
-LLM_MODEL = cfg("llm_model", "LLM_MODEL", "qwen3.8-27b")
+LLM_MODEL = cfg("llm_model", "LLM_MODEL", "qwen3.8-flash")
 LLM_TIMEOUT = int(cfg("llm_timeout", "LLM_TIMEOUT", "60") or 60)
 # qwen3.8 默认开思考：实测 8 条下注文本 86.9s、且 03头 解析成 "0"；
 # 关掉后 8.6s、8/8 正确。所以默认关闭，可用 LLM_THINKING=1 打开做对照。

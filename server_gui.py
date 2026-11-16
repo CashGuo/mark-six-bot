@@ -194,7 +194,7 @@ DEFAULTS = {
     "wx_skew_sec": 300,
     "llm_api_key": "",
     "llm_base_url": DEFAULT_BASE,
-    "llm_model": "qwen3.8-27b",
+    "llm_model": "qwen3.8-flash",
     "llm_thinking": 0,
     "llm_timeout": 60,
     "contacts_interval_sec": 21600,
@@ -1047,7 +1047,7 @@ class MainWindow:
         self.v_base = self._row(g2, "接口地址", "llm_base_url",
                                 "兼容 OpenAI 协议的 /v1 地址，一般不用改", 1)
         self.v_model = self._row(g2, "模型名", "llm_model",
-                                 "默认 qwen3.8-27b；换成别的模型名也行", 2)
+                                 "默认 qwen3.8-flash；换成别的模型名也行", 2)
         row = tk.Frame(g2, bg=CLR_BG)
         row.pack(fill="x", pady=4, padx=8)
         tk.Label(row, text="思考模式", font=FONT, bg=CLR_BG, fg="#374151",
