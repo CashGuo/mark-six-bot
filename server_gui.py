@@ -410,6 +410,12 @@ class MainWindow:
         self.root = root
         self.cfg = read_cfg()
         self._proc = None
+        # 点了「启动服务」之后、端口还没响应之前的那几秒：状态栏显示「启动中」，
+        # 按钮文字跟着变，轮询间隔缩短到 1 秒（正常 5 秒太慢，用户以为没反应）。
+        self._starting = False
+        self._toast_job = None        # 状态栏那句临时提示的定时器
+        self._hint_text = ""
+        self._hint_color = CLR_MUTED
         self.acc = ""                 # 空 = 全部账号合计
         self._acc_sig = None
         # 澳门、香港两本账各一套号码盘/风险表，按盘口分别记指纹
@@ -452,23 +458,24 @@ class MainWindow:
         # 程序名在窗口标题栏上已经有了，去掉。
         card = tk.Frame(self.root, bg=CLR_CARD, highlightbackground=CLR_LINE,
                         highlightthickness=1)
-        # 顶部状态卡（运行中 / 端口 / 看板地址 / 账号累计今日）不上屏了：
-        # 用户说这些不重要、还占高度，省下来给号码盘。控件照旧创建，
-        # _refresh_status 照旧 configure，只是不 pack 到窗口上。
+        # 状态卡回归（用户要求）：只留「● 运行中 / 未运行 + 一句话提示」这一行。
+        # 端口、看板地址、账号累计那三格当初嫌占高度，不上屏 —— 控件照旧创建，
+        # _refresh_status 照旧 configure。
         inner = tk.Frame(card, bg=CLR_CARD)
-        inner.pack(fill="x", padx=14, pady=10)
+        inner.pack(fill="x", padx=14, pady=8)
 
         self.lb_state = tk.Label(inner, text="● 检测中",
                                  font=("Microsoft YaHei UI", 13, "bold"),
                                  bg=CLR_CARD, fg=CLR_MUTED)
         self.lb_state.grid(row=0, column=0, sticky="w")
-        self.lb_hint = tk.Label(inner, text="", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED)
+        self.lb_hint = tk.Label(inner, text="", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED,
+                                anchor="w", justify="left", wraplength=780)
         self.lb_hint.grid(row=0, column=1, columnspan=4, sticky="w", padx=10)
 
         cells = [("端口", "lb_port"), ("看板地址", "lb_dash"), ("账号 / 累计 / 今日", "lb_sum")]
         for i, (t, attr) in enumerate(cells):
             wrap = tk.Frame(inner, bg=CLR_CARD)
-            wrap.grid(row=1, column=i, sticky="w", padx=(0, 26), pady=(8, 0))
+            # 不 grid：这三格不上屏，控件留着给 _refresh_status 用
             tk.Label(wrap, text=t, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED).pack(anchor="w")
             lb = tk.Label(wrap, text="—", font=FONT_B, bg=CLR_CARD, fg="#111827")
             lb.pack(anchor="w")
@@ -476,6 +483,7 @@ class MainWindow:
 
         # 按钮条必须先于 Notebook 占位：Tk 的 pack 按调用顺序分空间，
         # 先 pack 的 expand 控件会把剩余高度全吃掉，后 pack 的底部条就只剩一条缝。
+        card.pack(fill="x", padx=16, pady=(8, 0))
         bar = tk.Frame(self.root, bg=CLR_CARD, highlightbackground=CLR_LINE,
                        highlightthickness=1)
         bar.pack(fill="x", side="bottom")
@@ -2034,13 +2042,28 @@ class MainWindow:
         b = getattr(self, "btn_run", None)
         if b is None:
             return
+        if self._starting:
+            return          # 启动那几秒保持「启动中…」，别被轮询刷回「停止服务」
         try:
+            b.configure(state="normal")
             if running:
                 b.configure(text="停止服务", bg="#fdf4f3", fg=CLR_RED,
                             activebackground="#fbeae8", activeforeground=CLR_RED)
             else:
                 b.configure(text="启动服务", bg=CLR_BLUE, fg="white",
                             activebackground=CLR_BLUE, activeforeground="white")
+        except Exception:
+            pass
+
+    def _paint_starting(self):
+        """点完「启动服务」到端口响应之间：按钮明说在启动，别让人以为没点上。"""
+        b = getattr(self, "btn_run", None)
+        if b is None:
+            return
+        try:
+            b.configure(text="启动中…", bg="#f2f4f7", fg="#78818f",
+                        activebackground="#eceff3", activeforeground="#78818f",
+                        state="normal")
         except Exception:
             pass
 
@@ -2052,17 +2075,20 @@ class MainWindow:
         ok, why = health(port)
         if ok:
             self.lb_state.configure(text="● 运行中", fg=CLR_OK)
-            self.lb_hint.configure(text="服务端在 %d 端口等着采集端推送" % port)
+            self._set_hint("服务端在 %d 端口等着采集端推送；关掉这个窗口不影响后台运行" % port)
             self._paint_run(True)
         else:
             pid = running_pid()
             if pid and _pid_alive(pid):
                 self.lb_state.configure(text="● 启动中", fg="#b8860b")
-                self.lb_hint.configure(text="进程在，但端口还没响应（前几秒正常）")
+                self._set_hint("正在拉起后台服务，端口就绪要几秒…", "#b8860b")
                 self._paint_run(True)
             else:
                 self.lb_state.configure(text="● 未运行", fg=CLR_BAD)
-                self.lb_hint.configure(text='点左下「启动服务」；窗口关掉不影响后台')
+                # 停着的时候采集端是推不进来的 —— 这句话必须写明，否则老板
+                # 以为界面还开着就在收注，实际一条都没收到。
+                self._set_hint("现在采集端推来的注收不到（采集端会重试一阵，停太久这几条就漏掉了）；"
+                               "点左下「启动服务」恢复", CLR_BAD)
                 self._paint_run(False)
         self.lb_port.configure(text=str(port))
         self.lb_dash.configure(text="http://127.0.0.1:%d/" % port)
@@ -2074,7 +2100,8 @@ class MainWindow:
             self.lb_sum.configure(text="—")
 
     def _loop(self):
-        self.root.after(5000, self._loop)
+        # 启动中每秒看一眼（用户盯着等），其余时候 5 秒一次省 CPU
+        self.root.after(1000 if self._starting else 5000, self._loop)
         try:
             self._refresh_status()
             # 只在当前页自动刷，别把别页的选中/滚动冲掉
@@ -2246,18 +2273,38 @@ class MainWindow:
             pid_path().write_text(str(self._proc.pid), encoding="utf-8")
         except Exception:
             pass
-        self._toast("已启动，正在等端口响应…")
-        self.root.after(1200, self._after_start)
-
-    def _after_start(self):
-        port = int(self.v_port.get() or 8899)
-        if health(port)[0]:
-            self._toast("服务端已就绪：http://127.0.0.1:%d/" % port)
-        else:
-            self._toast("还没响应，稍等几秒；不行就看「日志」页")
+        self._starting = True
+        self._paint_starting()
         self._refresh_status()
+        self._toast("正在拉起后台服务…")
+        # 400ms 起开始盯，每 700ms 一次，最多等 25 秒：以前只查一次（1.2 秒），
+        # 冷启动要好几秒，用户点完看不到任何变化，只能瞎等。
+        self.root.after(400, lambda: self._wait_ready(port, time.time() + 25))
+
+    def _wait_ready(self, port, deadline):
+        """轮询到端口响应（或进程死掉 / 超时）为止，期间状态栏一直是「启动中」。"""
+        if not self._starting:
+            return                      # 中途点了停止
+        if health(port)[0]:
+            self._starting = False
+            self._refresh_status()
+            self._toast("服务端已就绪：http://127.0.0.1:%d/" % port)
+            return
+        pid = running_pid()
+        if not (pid and _pid_alive(pid)):
+            self._starting = False
+            self._refresh_status()
+            self._toast("服务进程没起来，去「消息」页看日志")
+            return
+        if time.time() >= deadline:
+            self._starting = False
+            self._refresh_status()
+            self._toast("等了 25 秒端口还没响应，去「消息」页看日志")
+            return
+        self.root.after(700, lambda: self._wait_ready(port, deadline))
 
     def stop_server(self):
+        self._starting = False           # 启动途中点停止：让 _wait_ready 收手
         pid = running_pid()
         killed = False
         if pid and _pid_alive(pid):
@@ -2447,7 +2494,38 @@ class MainWindow:
 
     # ---- 小工具 ----
     def _toast(self, msg):
-        self.lb_hint.configure(text=msg)
+        """状态栏第二行兼做临时提示：3 秒后自动恢复成「现在是什么状态」的说明。
+
+        以前这里直接写 lb_hint 就不管了，结果提示「已停止」的和状态行「● 运行中」
+        并排挂着，两句话互相打脸。所以提示要有保质期。
+        """
+        try:
+            self.lb_hint.configure(text=msg, fg="#374151")
+        except Exception:
+            return
+        if self._toast_job is not None:
+            try:
+                self.root.after_cancel(self._toast_job)
+            except Exception:
+                pass
+        self._toast_job = self.root.after(3000, self._restore_hint)
+
+    def _restore_hint(self):
+        self._toast_job = None
+        try:
+            self.lb_hint.configure(text=self._hint_text, fg=self._hint_color)
+        except Exception:
+            pass
+
+    def _set_hint(self, text, color=None):
+        """状态说明：记下来（给 _restore_hint 用），临时提示还在就先不抢显示。"""
+        self._hint_text = text
+        self._hint_color = color or CLR_MUTED
+        if self._toast_job is None:
+            try:
+                self.lb_hint.configure(text=text, fg=self._hint_color)
+            except Exception:
+                pass
 
 
 def run():
