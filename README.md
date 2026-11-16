@@ -48,7 +48,7 @@ PORT=8899
 WX_SKEW_SEC=300
 
 # 可选：一个接收端接多个微信号时，按「客户编号:密钥」配多把（见 6.2）
-# WX_ACCOUNT_SECRETS=C0001:984a04eb...,C0002:另一把64位十六进制
+# WX_ACCOUNT_SECRETS=C0001:你的推送密钥,C0002:另一把64位十六进制
 ```
 
 - `WX_PUSH_SECRET` 必须与厂商给你的那串**完全一致**，否则所有推送都会被 401 拒掉。
@@ -198,7 +198,7 @@ WxPushTool 那边把推送地址填成 `http://<本机内网IP>:8899/wx/hook`。
 
 ```ini
 # 一个客户编号一把密钥，逗号分隔
-WX_ACCOUNT_SECRETS=C0001:984a04eb584d...,C0002:另一把64位十六进制
+WX_ACCOUNT_SECRETS=C0001:你的推送密钥,C0002:另一把64位十六进制
 ```
 
 - 配了 `WX_ACCOUNT_SECRETS` 之后，`WX_PUSH_SECRET` 变成**兜底密钥**：请求头没带 `X-Wx-Cust`、
