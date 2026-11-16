@@ -1042,11 +1042,11 @@ class MainWindow:
             return g
 
         g1 = group("采集端与验签")
-        self.v_secret = self._row(g1, "推送密钥", "wx_push_secret",
-                                  "白名单为空时才用到它。名单一旦有条目，服务端只认名单里的密钥", 0,
-                                  secret=True)
+        # 这里不再有「推送密钥」：每个采集端一把 API Key，全在「白名单」页里管。
+        # 老配置里那把密钥服务端仍然认（名单为空时的兜底），但界面上不再让人填，
+        # 免得两份密钥并存、说不清到底认哪个。
         self.v_port = self._row(g1, "端口", "port",
-                                "默认 8899。改完要停止再启动才生效；采集端的推送地址也要跟着改", 1)
+                                "默认 8899。改完要停止再启动才生效；采集端的推送地址也要跟着改", 0)
         tip = tk.Label(g1, text="接几个采集端、各自用哪把密钥、到期时间、IP 限制，都在「白名单」页里管："
                                 "点「新增」会生成 API Key，填到采集端就能推。",
                        font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left")
@@ -1474,8 +1474,10 @@ class MainWindow:
         heads = {"wid": "微信号", "cust": "客户", "secret": "密钥",
                  "expire": "有效期至", "ip": "IP 白名单", "last": "最后推送",
                  "state": "状态", "copy": "API Key"}
-        widths = {"wid": 150, "cust": 90, "secret": 140, "expire": 100,
-                  "ip": 130, "last": 140, "state": 80, "copy": 80}
+        # 列宽合计压到 850：125% 缩放的笔记本上窗口会窄一圈，再宽的话
+        # 最右边那列「API Key」会被裁到框外，用户点它等于点空气。
+        widths = {"wid": 150, "cust": 90, "secret": 120, "expire": 100,
+                  "ip": 110, "last": 120, "state": 80, "copy": 80}
         self.tv_wl = ttk.Treeview(body, columns=cols, show="headings", height=12)
         for c in cols:
             self.tv_wl.heading(c, text=heads[c])
@@ -1503,7 +1505,11 @@ class MainWindow:
            ).pack(side="left", padx=(0, 6))
         mk("停用", lambda: self._white_set(False), "#fdf4f3", CLR_RED
            ).pack(side="left", padx=(0, 6))
-        mk("删除", self._white_delete, "#fdf4f3", CLR_RED).pack(side="left")
+        mk("删除", self._white_delete, "#fdf4f3", CLR_RED).pack(side="left", padx=(0, 10))
+        # 表格里点最右那列也能复制，但列窄 / 铺满的时候容易点空，
+        # 这里再给一个踏实的入口：选中一行 → 点这个按钮。
+        mk("复制 Key", self._white_copy_sel, "#eef7ff", CLR_BLUE2
+           ).pack(side="left")
         self.lb_wl_tip = tk.Label(foot, text="", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED)
         self.lb_wl_tip.pack(side="right")
 
@@ -1597,8 +1603,15 @@ class MainWindow:
             self.lb_wl_mode.configure(
                 text="名单里的采集端全部已停用：一律拒收", fg=CLR_RED)
         else:
-            self.lb_wl_mode.configure(
-                text="兼容模式：名单是空的，还在用配置页那把密钥", fg="#b5651d")
+            # 名单空时还能不能跑，取决于老配置里有没有那把兜底密钥
+            legacy = str(read_cfg().get("wx_push_secret") or "").strip()
+            if legacy:
+                self.lb_wl_mode.configure(
+                    text="兼容模式：名单是空的，还在用老配置里那把密钥（建议「新增」换成 API Key）",
+                    fg="#b5651d")
+            else:
+                self.lb_wl_mode.configure(
+                    text="还没有采集端：点「新增」生成 API Key，否则服务起不来", fg=CLR_RED)
         upd = doc.get("updated_at") or "—"
         self.lb_wl_sub.configure(
             text="白名单 %d 个 · 启用 %d 个 · 最后更新 %s" % (len(rows), en, upd))
@@ -1609,6 +1622,30 @@ class MainWindow:
         else:
             tip = "还没有客户端：点「新增」生成 API Key，填到采集端「配置」页的「服务端 API Key」"
         self.lb_wl_tip.configure(text=tip)
+
+    def _copy_key(self, wid, silent=False):
+        """把某个微信号的明文 API Key 放进剪贴板。点列和点按钮共用这一份。"""
+        key = (getattr(self, "_wl_plain", None) or {}).get(wid) or ""
+        if not key:
+            self._toast("%s 这一行没有密钥" % (wid or "选中"))
+            return False
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(key)
+        except Exception as e:
+            self._toast("复制失败：%r" % (e,))
+            return False
+        if not silent:
+            self._toast("已复制 %s 的 API Key（%d 位），粘到采集端「配置」页即可"
+                        % (wid, len(key)))
+        return True
+
+    def _white_copy_sel(self):
+        """「复制 Key」按钮：复制当前选中那一行。"""
+        wid = self._white_sel()
+        if not wid:
+            return
+        self._copy_key(wid)
 
     def _white_click(self, event):
         """点最右那一列的「复制」= 把这一行的 API Key 放进剪贴板。
@@ -1627,18 +1664,12 @@ class MainWindow:
             wid = str(self.tv_wl.item(row, "values")[0] or "")
         except Exception:
             return
-        key = (getattr(self, "_wl_plain", None) or {}).get(wid) or ""
-        if not key:
-            self._toast("%s 这一行没有密钥" % (wid or "选中"))
+        if not self._copy_key(wid):
             return
         try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(key)
-        except Exception as e:
-            self._toast("复制失败：%r" % (e,))
-            return
-        self.tv_wl.selection_set(row)
-        self._toast("已复制 %s 的 API Key（%d 位）" % (wid, len(key)))
+            self.tv_wl.selection_set(row)
+        except Exception:
+            pass
 
     def _white_sel(self):
         sel = self.tv_wl.selection()
@@ -2205,12 +2236,12 @@ class MainWindow:
                 "开奖时间设成 %s，本期的注在上午就会停止接收。\n确定要这样吗？" % draw):
             return
         self.v_draw.set(draw)
-        # wx_account_secrets 不在这里改：它已经被「白名单」页接管，
-        # 原值原样写回，免得老配置被别人一次保存就清空。
+        # wx_push_secret / wx_account_secrets 都不在这里改：验签已经全交给「白名单」页，
+        # 原值原样写回，免得老配置被一次保存就清空（服务端仍认这两个字段做兜底）。
         old = read_cfg()
         write_cfg({
             "port": port,
-            "wx_push_secret": self.v_secret.get().strip(),
+            "wx_push_secret": str(old.get("wx_push_secret") or ""),
             "wx_account_secrets": str(old.get("wx_account_secrets") or ""),
             "llm_api_key": self.v_key.get().strip(),
             "llm_base_url": self.v_base.get().strip(),
@@ -2246,14 +2277,17 @@ class MainWindow:
         missing = []
         if not self.v_key.get().strip():
             missing.append("大模型 API Key")
-        # 白名单有条目就不需要全局密钥了；否则还得填一把，不然一个号都收不进来
+        # 每个采集端一把 API Key，名单里没有启用的条目就一个号都收不进来。
+        # 界面上已经不给填「推送密钥」了，但老配置里那把服务端还认，
+        # 所以这里兼容一下：有它就还能按兜底模式起，只是提示去白名单页补。
         wl_ok = self._white_enabled_count() > 0
-        if not wl_ok and not self.v_secret.get().strip():
-            missing.append("推送密钥（或者先在「白名单」页加一个采集端）")
+        if not wl_ok and not str(read_cfg().get("wx_push_secret") or "").strip():
+            missing.append("白名单里还没有启用的采集端"
+                           "（去「白名单」页点「新增」，会生成 API Key）")
         if missing:
             messagebox.showerror("配置还没填",
                                  "缺这些必填项，服务起不来：\n\n  · " + "\n  · ".join(missing) +
-                                 "\n\n先在本页填好，点「保存配置」。")
+                                 "\n\n填好后点「保存配置」再启动。")
             return
 
         cmd = self_cmd() + ["--headless", "--quiet"]
