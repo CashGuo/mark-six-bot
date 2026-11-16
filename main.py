@@ -466,15 +466,28 @@ def get_current_lunar_year() -> Tuple[int, str, Dict[str, List[str]]]:
 
 
 _zodiac_cache = {"day": None, "value": None}
+_ZODIAC_LOCK = threading.Lock()
 
 
 def current_zodiac_mapping() -> Dict[str, List[str]]:
-    """按天缓存农历生肖表：看板 5 秒刷一次，避免重复计算和刷日志。"""
+    """按天缓存农历生肖表：看板 5 秒刷一次，避免重复计算和刷日志。
+
+    这里必须"先算好再一次换上新值"。早先的写法是先写 day、再算 value：
+    两个线程同一秒进来，后一个看到 day 已经是今天、value 还是 None，
+    直接 TypeError 把整批推送打成 500 —— 那一批消息就全丢了。
+    """
     today = datetime.now().strftime("%Y-%m-%d")
-    if _zodiac_cache["day"] != today:
-        _zodiac_cache["day"] = today
-        _zodiac_cache["value"] = get_current_lunar_year()
-    return _zodiac_cache["value"][2]
+    v = _zodiac_cache["value"]
+    if _zodiac_cache["day"] == today and v:
+        return v[2]
+    with _ZODIAC_LOCK:
+        v = _zodiac_cache["value"]
+        if _zodiac_cache["day"] == today and v:
+            return v[2]
+        v = get_current_lunar_year()
+        _zodiac_cache["value"] = v       # 先给值
+        _zodiac_cache["day"] = today     # 再认日期：别的线程读不到半成品
+        return v[2]
 
 
 # ======================== 号码对照表 ========================
@@ -979,6 +992,22 @@ def parse_bet_text(text: str, zodiac_mapping: Dict[str, List[str]]) -> Dict[str,
 
 _processed: List[str] = []
 _processed_set = set()
+_MSG_LOCK = threading.Lock()          # 查重 + 占位要一步做完，见 claim_message
+_PERSIST_LOCK = threading.Lock()      # 两个文件都不能被两个线程同时写
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    """写 JSON：临时名带 pid/线程号 + 原子替换。
+
+    以前临时名是固定的 `xxx.json.tmp`：两个线程同时保存去重记录会撞车，
+    日志里能看到 Permission denied / WinError 32。去重记录没落盘，
+    进程重启后同一批消息会被当成新的再记一遍账 —— 那就是多记账。
+    """
+    tmp = path.with_name("%s.%d.%d.tmp"
+                         % (path.name, os.getpid(), threading.get_ident()))
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
 
 
 def _load_processed():
@@ -996,10 +1025,8 @@ def _load_processed():
 
 def _save_processed():
     try:
-        tmp = PROCESSED_FILE.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_processed[-MAX_PROCESSED:], f, ensure_ascii=False)
-        os.replace(tmp, PROCESSED_FILE)
+        with _PERSIST_LOCK:
+            _atomic_write_json(PROCESSED_FILE, _processed[-MAX_PROCESSED:])
     except Exception as e:
         logger.warning(f"保存去重记录失败：{e}")
 
@@ -1008,17 +1035,39 @@ def is_message_processed(msg_id: str) -> bool:
     return msg_id in _processed_set
 
 
+def claim_message(msg_id: str) -> bool:
+    """查重和占位一次做完：两个线程抢同一条消息，只有一个能拿到 True。
+
+    拆成 is_message_processed() + mark_message_processed() 两步时中间有个缝：
+    同一 msg_id 的两条推送同时进来，两边都查到"没处理过"，于是各记一次账。
+    """
+    global _processed
+    with _MSG_LOCK:
+        if msg_id in _processed_set:
+            return False
+        _processed_set.add(msg_id)
+        _processed.append(msg_id)
+        if len(_processed) > MAX_PROCESSED:
+            drop = len(_processed) - MAX_PROCESSED
+            for x in _processed[:drop]:
+                _processed_set.discard(x)
+            _processed = _processed[drop:]
+    _save_processed()
+    return True
+
+
 def mark_message_processed(msg_id: str):
     global _processed
-    if msg_id in _processed_set:
-        return
-    _processed_set.add(msg_id)
-    _processed.append(msg_id)
-    if len(_processed) > MAX_PROCESSED:
-        drop = len(_processed) - MAX_PROCESSED
-        for x in _processed[:drop]:
-            _processed_set.discard(x)
-        _processed = _processed[drop:]
+    with _MSG_LOCK:
+        if msg_id in _processed_set:
+            return
+        _processed_set.add(msg_id)
+        _processed.append(msg_id)
+        if len(_processed) > MAX_PROCESSED:
+            drop = len(_processed) - MAX_PROCESSED
+            for x in _processed[:drop]:
+                _processed_set.discard(x)
+            _processed = _processed[drop:]
     _save_processed()
 
 
@@ -1028,13 +1077,14 @@ def unmark_message_processed(msg_id: str) -> bool:
     不放出来的话，客户说「你记错了，我重发一遍」会被判成重复推送直接扔掉。
     """
     global _processed
-    if msg_id not in _processed_set:
-        return False
-    _processed_set.discard(msg_id)
-    try:
-        _processed = [x for x in _processed if x != msg_id]
-    except Exception:
-        pass
+    with _MSG_LOCK:
+        if msg_id not in _processed_set:
+            return False
+        _processed_set.discard(msg_id)
+        try:
+            _processed = [x for x in _processed if x != msg_id]
+        except Exception:
+            pass
     _save_processed()
     return True
 
@@ -1064,10 +1114,8 @@ def _load_fingerprints():
 
 def _save_fingerprints():
     try:
-        tmp = FINGERPRINT_FILE.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_fp[-MAX_FINGERPRINTS:], f, ensure_ascii=False)
-        os.replace(tmp, FINGERPRINT_FILE)
+        with _PERSIST_LOCK:
+            _atomic_write_json(FINGERPRINT_FILE, _fp[-MAX_FINGERPRINTS:])
     except Exception as e:
         logger.warning(f"保存指纹失败：{e}")
 
@@ -1078,6 +1126,30 @@ def msg_fingerprint(chat_id: str, create_time, sender, content: str) -> str:
     """
     raw = f"{chat_id}|{create_time}|{sender}|{(content or '').strip()}".encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:32]
+
+
+def claim_fingerprint(fp: str) -> bool:
+    """指纹查重 + 占位一步做完。
+
+    两个微信号监听同一个群时，同一条内容会到两次（msg_id 不同）：
+    先 is_fingerprint_seen 再 mark_fingerprint 的话，两条同时到时都会判"没见过"，
+    于是同一个群被记两笔账。
+    """
+    global _fp
+    if not fp:
+        return True
+    with _FP_LOCK:
+        if fp in _fp_set:
+            return False
+        _fp_set.add(fp)
+        _fp.append(fp)
+        if len(_fp) > MAX_FINGERPRINTS:
+            drop = len(_fp) - MAX_FINGERPRINTS
+            for x in _fp[:drop]:
+                _fp_set.discard(x)
+            _fp = _fp[drop:]
+    _save_fingerprints()
+    return True
 
 
 def is_fingerprint_seen(fp: str) -> bool:
@@ -2193,11 +2265,10 @@ def wx_hook():
             skipped += 1
             msg_rows.append(_row(m, "跳过", "缺 msg_id"))
             continue
-        if is_message_processed(msg_id):
+        if not claim_message(msg_id):
             skipped += 1
             msg_rows.append(_row(m, "跳过", "重复推送"))
             continue
-        mark_message_processed(msg_id)
 
         mtype = str(m.get("msg_type") or "")
         if mtype in SKIP_TYPES:
@@ -2220,7 +2291,7 @@ def wx_hook():
         # 同一群被两个微信号同时监听时：msg_id 各自独立，靠内容指纹挡第二份
         fp = msg_fingerprint(str(m.get("target_id") or m.get("chat_id") or ""),
                              m.get("create_time"), str(m.get("sender") or ""), content)
-        if is_fingerprint_seen(fp):
+        if not claim_fingerprint(fp):
             logger.info(f"[跨账号重复] {acc} {content[:40]}")
             skipped += 1
             msg_rows.append(_row(m, "跳过", "另一个号已经收过", acc=acc))
@@ -2231,8 +2302,8 @@ def wx_hook():
                        str(m.get("sender_name") or ""), account=acc,
                        fp=fp, chat_id=str(m.get("target_id") or m.get("chat_id") or ""),
                        create_time=m.get("create_time"))
-        # 无论记账成功还是落 unparsed 都记指纹：省得另一个号再花一次 AI 额度
-        mark_fingerprint(fp)
+        # 指纹在解析前就占住了（不占的话同一条内容可能被两个号各记一笔）；
+        # 解析失败要放回去，让另一个号 / 重推还能重新走一遍。
         if r.get("ok"):
             recorded += 1
             msg_rows.append(_row(m, "记账", "¥%s" % r.get("total"), acc=acc,
@@ -2240,11 +2311,14 @@ def wx_hook():
             # 回复文案在这里定，采集端只负责发、不拼文案：
             # 金额和号码数都是服务端算出来的，采集端拿不到这个上下文。
             chat = str(m.get("chat_name") or "")
-            if chat:
+            chat_id = str(m.get("target_id") or m.get("chat_id") or "")
+            # 以前这里判的是 `if chat:` —— 群名取不到（客户刚拉群、名字还没同步）
+            # 就静默不回，账记上了但客户没收到回执。只要有一个标识就回。
+            if chat or chat_id:
                 replies.append({
                     "msg_id": msg_id,
-                    "chat": chat,
-                    "chat_id": str(m.get("target_id") or m.get("chat_id") or ""),
+                    "chat": chat or chat_id,
+                    "chat_id": chat_id,
                     # 客户要的是"收到了、怎么算的"一句话：鼠 各50共计200。
                     # 规则算出来的 detail 就是这个形态，模型兜底的用简单版。
                     "text": r.get("detail") or ("已记账 ¥%s" % _fmt_money(r.get("total"))),
