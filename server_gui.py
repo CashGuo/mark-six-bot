@@ -200,6 +200,7 @@ DEFAULTS = {
     "llm_model": "qwen3.8-flash",
     "llm_thinking": 0,
     "llm_timeout": 60,
+    "draw_time": "21:30",
     "contacts_interval_sec": 21600,
 }
 
@@ -1059,6 +1060,15 @@ class MainWindow:
         tk.Checkbutton(row, text="开启（慢但更啰嗦；实测关掉更快更准）", variable=self.v_think,
                        font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, activebackground=CLR_BG,
                        selectcolor=CLR_BG).pack(side="left")
+
+        g3 = group("收注规则")
+        self.v_draw = self._row(g3, "开奖时间", "draw_time",
+                                "过了这个时间本期不再收注（微信推来的注会被拒并回一句说明），"
+                                "次日 0 点自动进入下一期", 0)
+        tk.Label(g3, text="填 HH:MM，例如 21:30。开奖日仍是周二 / 周四 / 周六；"
+                          "手工记账不受这个时间限制（开奖后可以补录）。",
+                 font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left").pack(
+                     fill="x", padx=14, pady=(0, 10))
 
         tk.Label(wrap, text="改完点左下「保存配置」（本页底部按钮条）；"
                             "正在跑的服务要「停止 → 启动」才会用上新配置。",
@@ -2146,6 +2156,28 @@ class MainWindow:
         except ValueError as e:
             messagebox.showerror("端口填错了", str(e))
             return
+
+        # 开奖时间：只认 HH:MM。填错必须当场拦下 —— 存进去一个怪值，
+        # 服务端会退回默认 21:30，客户改的"没生效"比报错更难查。
+        raw = (self.v_draw.get() or "").strip().replace("：", ":").replace(".", ":")
+        if not raw:
+            raw = "21:30"
+        if ":" not in raw and raw.isdigit() and len(raw) in (3, 4):
+            raw = raw[:-2] + ":" + raw[-2:]
+        try:
+            hh, mm = [int(x) for x in raw.split(":")[:2]]
+        except Exception:
+            hh = mm = -1
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            messagebox.showerror("开奖时间填错了",
+                                 "要填 HH:MM，例如 21:30。\n现在填的是：%s" % self.v_draw.get())
+            return
+        draw = "%02d:%02d" % (hh, mm)
+        if hh < 12 and not messagebox.askyesno(
+                "确认开奖时间",
+                "开奖时间设成 %s，本期的注在上午就会停止接收。\n确定要这样吗？" % draw):
+            return
+        self.v_draw.set(draw)
         # wx_account_secrets 不在这里改：它已经被「白名单」页接管，
         # 原值原样写回，免得老配置被别人一次保存就清空。
         old = read_cfg()
@@ -2157,6 +2189,7 @@ class MainWindow:
             "llm_base_url": self.v_base.get().strip(),
             "llm_model": self.v_model.get().strip(),
             "llm_thinking": 1 if self.v_think.get() else 0,
+            "draw_time": draw,
         })
         self.cfg = read_cfg()
         self._toast("配置已保存（正在跑的服务要停止再启动才生效）")

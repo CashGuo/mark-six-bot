@@ -132,6 +132,7 @@ tr.sel{background:#f3f7fd}
     <datalist id="whoList"></datalist>
     <span class="sp"></span>
     <span class="lbl" id="yearChip"></span>
+    <span class="lbl" id="closedTip" style="display:none;color:var(--red);font-weight:700"></span>
     <a href="/" class="btn" style="text-decoration:none">回看板</a>
   </div>
 
@@ -270,6 +271,23 @@ async function boot() {
 
   renderNums(); renderZ(); renderPlays(); renderZx();
   poke();
+  checkCutoff();
+}
+
+// 过了开奖时间，这里记的都是补录。手工记账本身不受限制（老板补单是正常业务），
+// 但界面上要让人知道现在记的是哪一期，别以为还在正常收注。
+async function checkCutoff() {
+  try {
+    const r = await fetch("/api/dashboard");
+    const d = await r.json();
+    const el = $("closedTip");
+    if (d && d.closed) {
+      el.style.display = "";
+      el.textContent = "本期已开奖（" + (d.draw_time || "") + "），现在记的是补录";
+    } else {
+      el.style.display = "none";
+    }
+  } catch (e) { /* 拿不到状态不影响记账 */ }
 }
 
 function renderNums() {

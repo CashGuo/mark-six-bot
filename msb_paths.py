@@ -84,7 +84,8 @@ _DEFAULT_CONFIG = """{
   "llm_base_url": "https://llm-o8ou6he0iyxcz0ns.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
   "llm_model": "qwen3.8-flash",
   "llm_thinking": 0,
-  "llm_timeout": 60
+  "llm_timeout": 60,
+  "draw_time": "21:30"
 }
 """
 

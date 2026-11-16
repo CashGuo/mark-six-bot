@@ -24,6 +24,9 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .sum{font-size:27px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--red)}
 .chip{font-size:12px;color:var(--dim);white-space:nowrap}
 .chip b{color:var(--ink);font-weight:600}
+/* 开奖时间：还剩多久写着；已封盘红字，一眼看出这期还能不能收注 */
+#closeInfo{color:var(--dim)}
+#closeInfo.closed{color:var(--red);font-weight:700}
 .sp{flex:1}
 .btn{border:1px solid var(--bd);background:#f7f8fa;color:var(--ink);
  padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12.5px}
@@ -117,7 +120,7 @@ td.wxid{color:#8a929e;font-size:11.5px;word-break:break-all;max-width:280px}
       <span class="sum-l">本期金额</span>
       <span class="sum" id="grand">0</span>
     </div>
-    <div class="chip">本期 <b id="issue">—</b></div>
+    <div class="chip">本期 <b id="issue">—</b><span id="closeInfo"></span></div>
     <div class="chip">生肖年 <b id="zyear">—</b></div>
     <div class="chip">有注号码 <b id="kbets">—</b></div>
     <div class="chip">本期已记账 <b id="krec">—</b></div>
@@ -303,6 +306,41 @@ function renderCombo(list){
   }).join('') + `<div class="csum">合计：${fmt(total)} 元</div>`;
 }
 
+// 开奖时间封盘。剩余秒数由服务端给，本地每秒减 —— 不信任客户端时钟。
+let CUT = {left: 0, draw: '', closed: true};
+
+function fmtLeft(s){
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (h > 0) return h + ' 小时 ' + (m > 0 ? m + ' 分' : '');
+  if (m > 0) return m + ' 分';
+  return s + ' 秒';
+}
+
+function paintCutoff(){
+  const el = document.getElementById('closeInfo');
+  if (!el) return;
+  if (CUT.closed || CUT.left <= 0){
+    el.className = 'closed';
+    el.textContent = ' · 已封盘（' + (CUT.draw || '') + ' 开奖）';
+  } else {
+    el.className = '';
+    el.textContent = ' · ' + CUT.draw + ' 截止（剩 ' + fmtLeft(CUT.left) + '）';
+  }
+}
+
+function setCutoff(d){
+  CUT = {left: Number(d.seconds_left || 0), draw: d.draw_time || '', closed: !!d.closed};
+  paintCutoff();
+}
+
+setInterval(function(){
+  if (CUT.left > 0){
+    CUT.left -= 1;
+    if (CUT.left <= 0){ CUT.closed = true; load(); }
+    paintCutoff();
+  }
+}, 1000);
+
 async function load(){
   try{
     const r = await fetch('/api/dashboard' + (ACC ? '?account=' + encodeURIComponent(ACC) : ''));
@@ -311,6 +349,7 @@ async function load(){
 
     document.getElementById('grand').textContent = fmt(d.grand_total);
     document.getElementById('issue').textContent = d.issue || '—';
+    setCutoff(d);
     document.getElementById('zyear').textContent = (d.zodiac_year || '—') + '年';
     document.getElementById('kbets').textContent = d.numbers_with_bets;
     document.getElementById('krec').textContent =

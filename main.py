@@ -1366,6 +1366,83 @@ def _as_date(ts=None):
         return datetime.now().date()
 
 
+def _as_dt(ts=None):
+    """和 _as_date 认同样的格式，但保留时分 —— 封盘要看"几点"，不能只看哪天。"""
+    if not ts or isinstance(ts, bool):
+        return datetime.now()
+    if isinstance(ts, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(ts))
+        except Exception:
+            return datetime.now()
+    s = str(ts).strip()
+    if not s:
+        return datetime.now()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                "%Y/%m/%d %H:%M:%S", "%Y/%m/%d", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromtimestamp(float(s))
+    except Exception:
+        return datetime.now()
+
+
+# 开奖时间：过这个点本期就不再收注，次日 0 点自动进下一期。
+# 期号本来就按开奖日（周二/周四/周六）算，所以这里只需要一个「当天几点封盘」。
+DRAW_TIME_DEFAULT = "21:30"
+
+
+def _parse_hhmm(s):
+    """'21:30' / '9:30' / '2130' → (21, 30)；认不出来返回 (None, None)。"""
+    t = str(s or "").strip().replace("：", ":").replace(".", ":")
+    if not t:
+        return None, None
+    if ":" not in t and t.isdigit() and len(t) in (3, 4):
+        t = t[:-2] + ":" + t[-2:]
+    try:
+        hh, mm = t.split(":")[:2]
+        hh, mm = int(hh), int(mm)
+    except Exception:
+        return None, None
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None, None
+    return hh, mm
+
+
+DRAW_TIME_RAW = cfg("draw_time", "MSB_DRAW_TIME", DRAW_TIME_DEFAULT)
+DRAW_TIME_HH, DRAW_TIME_MM = _parse_hhmm(DRAW_TIME_RAW)
+if DRAW_TIME_HH is None:
+    logger.warning(f"开奖时间写法不对（{DRAW_TIME_RAW}），按 {DRAW_TIME_DEFAULT} 处理")
+    DRAW_TIME_RAW = DRAW_TIME_DEFAULT
+    DRAW_TIME_HH, DRAW_TIME_MM = _parse_hhmm(DRAW_TIME_DEFAULT)
+DRAW_TIME = "%02d:%02d" % (DRAW_TIME_HH, DRAW_TIME_MM)
+
+
+def draw_cutoff_state(at=None) -> dict:
+    """这一期还收不收注。
+
+    at 传消息时间就用消息时间判 —— 采集端积压几分钟再推上来时，客户明明是在
+    开奖前发的注，不能因为服务器收到得晚就退回去。不传按服务器当前时间判。
+    """
+    now = _as_dt(at)
+    issue = issue_of(now)
+    try:
+        d = datetime.strptime(issue, "%Y-%m-%d").date()
+    except Exception:
+        d = now.date()
+    close_at = datetime(d.year, d.month, d.day, DRAW_TIME_HH, DRAW_TIME_MM)
+    return {
+        "issue": issue,
+        "draw_time": DRAW_TIME,
+        "close_at": close_at,
+        "closed": now >= close_at,
+        "now": now,
+    }
+
+
 def issue_of(ts=None) -> str:
     """这条账归哪一期，用开奖日做期号。
 
@@ -1574,7 +1651,7 @@ def issue_summary(account=None, limit: int = 60) -> Dict[str, object]:
 def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
                sender_name: str = "", account: str = "",
                fp: str = "", chat_id: str = "", create_time=None,
-               market: str = "") -> dict:
+               market: str = "", allow_after_close: bool = False) -> dict:
     """一单：解析 → 累加 → 落盘。返回结果 dict（供接口/日志用）。
 
     account 决定落到哪个账号的账本；空则落 DEFAULT_ACCOUNT。
@@ -1582,10 +1659,21 @@ def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
     内容指纹都放出来，不存下来就找不回去。
     market 是盘口覆盖：控制台手工记账已经用「澳门/香港」开关明确选了，
     就按它落账，不再看文本里有没有「港」；留空仍按文本判（微信推送走这条）。
+    allow_after_close 只有手工记账会传 True —— 开奖后老板补记客户电话/纸单
+    是正常业务，微信推送不能开这个口子。
     """
     text = (text or "").strip()
     if not text:
         return {"ok": False, "reason": "空文本"}
+
+    # 开奖时间闸门。放在解析之前：封盘了就别再花模型额度和几百毫秒。
+    if not allow_after_close:
+        st = draw_cutoff_state(create_time)
+        if st["closed"]:
+            logger.info(f"[已开奖] {chat_name or '?'} {text[:40]}"
+                        f"（本期 {st['issue']} 已过 {st['draw_time']}）")
+            return {"ok": False, "closed": True,
+                    "reason": "本期已开奖（%s）" % st["draw_time"]}
 
     acc = resolve_account(account)
     zodiac_mapping = current_zodiac_mapping()
@@ -2383,12 +2471,31 @@ def wx_hook():
                 msg_rows.append(_row(m, "跳过", "另一个号已经收过", acc=acc))
                 continue
 
-            accepted += 1
             r = record_bet(content, msg_id, m.get("chat_name") or "",
                            str(m.get("sender") or ""), str(m.get("sender_name") or ""),
                            account=acc, fp=fp,
                            chat_id=str(m.get("target_id") or m.get("chat_id") or ""),
                            create_time=m.get("create_time"))
+            # 本期已开奖：不记账，但消息要留痕（老板要对账），还要回一句说清楚，
+            # 不然客户以为记上了，开奖后对不上账。
+            if r.get("closed"):
+                skipped += 1
+                msg_rows.append(_row(m, "跳过", r.get("reason") or "已开奖", acc=acc))
+                # 指纹放回去：这条没记上账，客户在群里重发一遍应当还能被认
+                unmark_fingerprint(fp)
+                chat = str(m.get("chat_name") or "")
+                chat_id = str(m.get("target_id") or m.get("chat_id") or "")
+                if chat or chat_id:
+                    replies.append({
+                        "msg_id": msg_id,
+                        "chat": chat or chat_id,
+                        "chat_id": chat_id,
+                        "text": "本期已开奖（%s），这单没记上，下期再下"
+                                % DRAW_TIME,
+                    })
+                continue
+
+            accepted += 1
             # 指纹在解析前就占住了（不占的话同一条内容可能被两个号各记一笔）；
             # 解析失败要放回去，让另一个号 / 重推还能重新走一遍。
             if r.get("ok"):
@@ -2892,6 +2999,9 @@ def api_dashboard():
     flat_items = (load_others(acc, mk).get("items") or [])[-8:] if (acc and mk != "ALL") else []
     banks = market_totals(acc or None)
 
+    # 这一期还收不收注。按服务器当前时间算，前端拿它显示「还剩多久 / 已封盘」。
+    cut = draw_cutoff_state()
+
     return jsonify({
         "grand_total": banks[mk]["total"],
         "flat_total": round(flat_total, 2),
@@ -2922,6 +3032,12 @@ def api_dashboard():
         "accounts": accs,
         # 这一屏的数字属于哪一期。账本只装本期，换期时自动归档并清零。
         "issue": current_issue(acc) if acc else issue_of(),
+        # 开奖时间封盘：过了点不再收注（微信推送会被拒），次日 0 点自动进下一期。
+        # seconds_left 让前端不必信任自己电脑的时钟。
+        "draw_time": cut["draw_time"],
+        "closed": cut["closed"],
+        "close_at": cut["close_at"].strftime("%m-%d %H:%M"),
+        "seconds_left": max(0, int((cut["close_at"] - cut["now"]).total_seconds())),
         "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "model": LLM_MODEL,
         "verify_enabled": not WX_SKIP_VERIFY,
@@ -3254,7 +3370,7 @@ def api_manual_submit():
         nonlocal total, numbers, archived
         r = record_bet(text, mid, chat_name=chat, sender="manual",
                        sender_name=str(j.get("sender") or "本人"),
-                       account=acc, market=market)
+                       account=acc, market=market, allow_after_close=True)
         if r.get("ok"):
             total += float(r.get("total") or 0)
             numbers += int(r.get("numbers") or 0)
@@ -3319,7 +3435,8 @@ def api_quick_bet():
                    sender="manual",
                    sender_name=str(j.get("sender") or "本人"),
                    account=acc,
-                   market=str(j.get("market") or ""))
+                   market=str(j.get("market") or ""),
+                   allow_after_close=True)
     r["account"] = acc
     return jsonify(r)
 
