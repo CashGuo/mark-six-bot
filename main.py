@@ -3045,6 +3045,101 @@ def api_dashboard():
     })
 
 
+def _board_issue_options(acc: str = "") -> list:
+    """可选账期：本期 + 已归档的前两期。与桌面控制台的 `_issue_choices` 同一口径。"""
+    cur = current_issue(acc) if acc else issue_of()
+    opts = [{"label": "本期 %s" % cur, "issue": cur}] if cur else []
+    arch = []
+    for a in ([acc] if acc else all_accounts()):
+        try:
+            arch += [p.stem for p in msb_view.issue_files(a)]
+        except Exception:
+            pass
+    arch = sorted(set(arch), reverse=True)
+    for i, iss in enumerate([x for x in arch if x and x != cur][:2]):
+        opts.append({"label": ("前一期 %s" if i == 0 else "前二期 %s") % iss,
+                     "issue": iss})
+    return opts
+
+
+@app.route("/api/board", methods=["GET"])
+def api_board():
+    """网页看板一屏要的东西，一次全给。
+
+    口径全部走 `msb_view.summary` —— 桌面控制台调的就是同一个函数，所以网页和
+    GUI 的数字永远一致，不会各算各的。澳门、香港两本盘面 + 两本风险榜一起给
+    （GUI 也是同时显示的）；另外带上消息流水，网页要靠它数「本期未解析」、
+    列未解析明细、以及点撤销。
+    """
+    req_acc = (request.args.get("account") or "").strip()
+    acc = resolve_account(req_acc) if req_acc else ""
+    try:
+        s = msb_view.summary(acc)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "读账本失败：%s" % e}), 500
+
+    cut = draw_cutoff_state()
+    rows = tail_messages(500)
+    try:
+        revd = reversed_msg_ids()
+    except Exception:
+        revd = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        mid = str(row.get("msg_id") or "")
+        if str(row.get("result") or "") == "记账":
+            row["reversed"] = bool(mid) and mid in revd
+        if not row.get("issue"):
+            # 老流水没存期号，按时间反推 —— 网页按期过滤就靠它
+            row["issue"] = msb_view.stage_of_ts(row.get("ts"))
+
+    return jsonify({
+        "ok": True,
+        "account": acc,
+        "accounts": s.get("accounts") or [],
+        "issue": s.get("issue") or "",
+        "zodiac": s.get("zodiac") or "",
+        "zodiac_year": s.get("zodiac_year") or "",
+        "grand_total": s.get("grand_total") or 0,
+        "markets": s.get("markets") or {},
+        "flat_total": s.get("flat_total") or 0,
+        "numbers_with_bets_all": s.get("numbers_with_bets_all") or 0,
+        "records_current": s.get("records_current") or 0,
+        "unparsed_current": s.get("unparsed_current") or 0,
+        "grids": s.get("grids") or {"MO": [], "HK": []},
+        "risks": s.get("risks") or {"MO": [], "HK": []},
+        # 平特 / 连肖 / 组合注不落 49 号盘，单列一块（和控制台同一函数算）
+        "zodiac_board": {"MO": zodiac_board(acc, "MO"), "HK": zodiac_board(acc, "HK")},
+        "recent": s.get("recent") or [],
+        "unparsed": s.get("unparsed") or [],
+        "messages": rows,
+        "issue_options": _board_issue_options(acc),
+        # 开奖时间封盘：过了点不再收注，次日 0 点自动进下一期
+        "draw_time": cut["draw_time"],
+        "closed": cut["closed"],
+        "close_at": cut["close_at"].strftime("%m-%d %H:%M"),
+        "seconds_left": max(0, int((cut["close_at"] - cut["now"]).total_seconds())),
+        "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+
+@app.route("/api/board/reverse", methods=["POST"])
+def api_board_reverse():
+    """网页看板的「撤销」：账务逻辑与 /api/reverse 完全同一套。
+
+    控制台那个撤销接口要令牌（令牌只在桌面进程手里，网页拿不到），看板是在本机
+    浏览器里直接点，所以单开一个口子；仍然只认本机来源 —— /api/ 前缀在
+    `_guard_requests` 里已经把非本机请求挡掉了。
+    """
+    j = request.get_json(silent=True) or {}
+    msg_id = str(j.get("msg_id") or "").strip()
+    if not msg_id:
+        return jsonify({"ok": False, "error": "缺 msg_id"}), 400
+    r = reverse_record(msg_id, note=str(j.get("note") or "网页看板撤销"))
+    return jsonify(r), (200 if r.get("ok") else 400)
+
+
 @app.route("/", methods=["GET"])
 def route_index():
     return render_template("dashboard.html")

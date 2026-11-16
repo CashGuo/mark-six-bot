@@ -7,192 +7,258 @@
 <style>
 :root{
   --bd:#ccd2da; --bd2:#e3e7ec; --ink:#1b212c; --dim:#78818f;
-  --bg:#f1f3f5; --head:#eaeef2;
-  --red:#c0392b; --blue:#2b6cb0; --green:#2b8a5f;
+  --bg:#f1f3f5; --head:#eaeef2; --card:#fafbfc;
+  --red:#c0392b; --blue:#2b6cb0; --green:#2b8a5f; --grey:#aab2bd;
+  /* 字号跟着窗口走：小窗口不至于把号码盘挤成一排黑点 */
+  --fs-num:clamp(11px, 1.05vw, 14px);
+  --fs-amt:clamp(11px, 1.05vw, 14px);
+  --fs-zod:clamp(11px, 1vw, 13px);
+  --fs-cell:clamp(11px, 1vw, 13px);
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
- font:14px/1.5 "Microsoft YaHei","Segoe UI",Arial,sans-serif;padding:14px}
-.wrap{max-width:1460px;margin:0 auto}
+ font:13.5px/1.45 "Microsoft YaHei","Segoe UI",Arial,sans-serif;padding:10px}
+.wrap{max-width:1680px;margin:0 auto}
 
-.bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
- background:#fff;border:1px solid var(--bd);border-radius:5px;
- padding:9px 14px;margin-bottom:10px}
-.title{font-size:17px;font-weight:800;letter-spacing:1.5px}
-.sumbox{display:flex;align-items:baseline;gap:6px}
+/* ---------- 顶部汇总条（与 GUI 顶栏同一行内容） ---------- */
+.topbar{display:flex;align-items:center;gap:clamp(10px,1.4vw,20px);flex-wrap:wrap;
+ background:#fff;border:1px solid var(--bd);border-radius:5px;padding:8px 12px;
+ margin-bottom:10px}
+.sumwrap{display:flex;align-items:baseline;gap:6px;flex:0 0 auto}
 .sum-l{font-size:12px;color:var(--dim)}
-.sum{font-size:27px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--red)}
+.sum{font-size:clamp(19px,2vw,26px);font-weight:800;color:var(--red);
+ font-variant-numeric:tabular-nums}
 .chip{font-size:12px;color:var(--dim);white-space:nowrap}
-.chip b{color:var(--ink);font-weight:600}
-/* 开奖时间：还剩多久写着；已封盘红字，一眼看出这期还能不能收注 */
+.chip b{color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}
+/* 开奖时间：还剩多久写着；已封盘红字，一眼看出这期还能不能收 */
 #closeInfo{color:var(--dim)}
 #closeInfo.closed{color:var(--red);font-weight:700}
-.sp{flex:1}
+#unpChip{cursor:pointer}
+#unpChip b{color:var(--blue);text-decoration:underline dotted}
+.grow{flex:1 1 auto}
 .btn{border:1px solid var(--bd);background:#f7f8fa;color:var(--ink);
- padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12.5px}
+ padding:5px 11px;border-radius:4px;cursor:pointer;font-size:12.5px;
+ text-decoration:none;display:inline-block}
 .btn:hover{background:#eef1f4}
 .btn.danger{color:var(--red);border-color:#e3b3ae;background:#fdf4f3}
+.sel{border:1px solid var(--bd);border-radius:4px;padding:4px 6px;font-size:12.5px;
+ background:#fff;color:var(--ink);outline:none;cursor:pointer}
 
-.grid2{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:10px;align-items:start}
-.grid2e{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start}
-.panel{background:#fff;border:1px solid var(--bd);border-radius:5px;overflow:hidden}
-.ph{background:var(--head);border-bottom:1px solid var(--bd);
- padding:8px 10px;font-size:14px;font-weight:700;color:#333d4b;
- display:flex;justify-content:space-between;align-items:center}
-.ph span{font-weight:400;color:var(--dim);font-size:12.5px}
+/* ---------- 主体：左（盘面 + 平特 + 记账）右（两本排序） ---------- */
+.main{display:grid;grid-template-columns:minmax(0,1fr) clamp(272px,25vw,400px);
+ gap:10px;align-items:start}
+.left{display:flex;flex-direction:column;gap:10px;min-width:0}
+.right{display:flex;flex-direction:column;gap:10px;min-width:0}
 
-.rows{padding:6px}
-.row{display:grid;grid-template-columns:30px repeat(5,1fr);gap:2px;margin-bottom:2px}
-.zod{background:var(--head);border:1px solid var(--bd2);border-radius:3px;
- display:flex;align-items:center;justify-content:center;
- font-size:13.5px;font-weight:800;color:#2a3442}
-.cell{display:flex;align-items:center;gap:5px;border:1px solid var(--bd2);
- border-radius:3px;padding:3px 5px;background:#fafbfc;min-height:28px}
-.num{width:26px;height:22px;border-radius:3px;color:#fff;font-size:13px;
- font-weight:700;display:flex;align-items:center;justify-content:center;
- font-variant-numeric:tabular-nums;flex:0 0 auto}
+.panel{background:#fff;border:1px solid var(--bd);border-radius:5px;overflow:hidden;
+ min-width:0}
+.ph{background:var(--head);border-bottom:1px solid var(--bd);padding:6px 10px;
+ font-size:13px;font-weight:700;color:#333d4b;display:flex;justify-content:space-between;
+ align-items:center;gap:8px}
+.ph .sub{font-weight:400;color:var(--dim);font-size:12px}
+
+/* ---------- 号码盘：生肖列 + 5 列号码（最后一列放本盘合计） ---------- */
+.boards{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tb{display:grid;grid-template-columns:clamp(26px,2.6vw,40px) repeat(5,minmax(0,1fr));
+ gap:2px;padding:6px}
+.zb{background:var(--head);border:1px solid var(--bd2);border-radius:3px;
+ display:flex;align-items:center;justify-content:center;font-size:var(--fs-zod);
+ font-weight:800;color:#4a5463;min-height:clamp(22px,3vh,34px)}
+.cell{display:flex;align-items:center;gap:clamp(3px,.4vw,6px);border:1px solid var(--bd2);
+ border-radius:3px;padding:2px clamp(3px,.4vw,6px);background:var(--card);
+ min-height:clamp(22px,3vh,34px);min-width:0}
+.num{width:clamp(22px,2.1vw,30px);height:clamp(18px,2.4vh,24px);border-radius:3px;
+ color:#fff;font-size:var(--fs-num);font-weight:700;display:flex;align-items:center;
+ justify-content:center;font-variant-numeric:tabular-nums;flex:0 0 auto}
 .num.r{background:var(--red)} .num.b{background:var(--blue)}
-.num.g{background:var(--green)} .num.n{background:#aab2bd}
-.amt{margin-left:auto;font-variant-numeric:tabular-nums;color:#aab3bf;font-size:13px}
-.amt.has{color:var(--ink);font-weight:800;font-size:13.5px}
+.num.g{background:var(--green)} .num.n{background:var(--grey)}
+/* 金额紧跟号码，不推到格子右边 —— 与 GUI 一致，隔太远会看成两个格子 */
+.amt{font-variant-numeric:tabular-nums;color:#aab3bf;
+ font-size:var(--fs-amt);white-space:nowrap}
+.amt.has{color:var(--ink);font-weight:800}
+.cell.blank{background:transparent;border:none}
+/* 本盘合计：钉在最后一列（49 号那一列）下半截，整列垂直居中 */
+.psum{display:flex;flex-direction:column;
+ align-items:center;justify-content:center;gap:2px;min-width:0}
+.psum .lb{font-size:12px;color:var(--dim);white-space:nowrap}
+.psum .v{font-size:clamp(13px,1.3vw,16px);font-weight:800;color:var(--red);
+ font-variant-numeric:tabular-nums}
 
-table{width:100%;border-collapse:collapse;font-size:13.5px}
-th{text-align:left;background:var(--head);color:#333d4b;font-weight:700;
- padding:7px 8px;border-bottom:1px solid var(--bd);white-space:nowrap;font-size:13px}
-td{padding:7px 8px;border-bottom:1px solid var(--bd2);vertical-align:middle}
-td.num2{font-variant-numeric:tabular-nums;white-space:nowrap}
-td.txt{color:#5b6675;word-break:break-all;max-width:420px}
-td.who{white-space:nowrap;color:#1f6feb;font-weight:700}
-.tr{text-align:right}
-.hot{color:var(--red);font-weight:700}
-.empty{color:var(--dim);text-align:center;padding:24px 0;font-size:13.5px}
-
-/* 生肖金额表：生肖字放大加粗上色，金额加大，一眼看出哪几个肖有量 */
-.zname{font-size:16px;font-weight:800;color:var(--blue);letter-spacing:1px;
- width:70px;white-space:nowrap}
-.zname2{font-size:14px;font-weight:800;color:#374151;width:70px;white-space:nowrap}
-.znums{font-size:12.5px;color:#8b95a3}
-.zamt{font-size:15px;font-weight:800}
-.zamt.hot{font-size:17px;font-weight:800;color:var(--red)}
-
-/* 组合注：一行一种玩法，类型名按玩法上色 */
-.cbox{display:flex;align-items:baseline;gap:10px;padding:8px 12px;
- border-bottom:1px solid var(--bd2)}
-.clb{font-size:14px;font-weight:800;white-space:nowrap}
-.czs{font-size:14.5px;font-weight:800;color:#111827;white-space:nowrap}
-.camt{font-size:15px;font-weight:800;color:var(--red);margin-left:auto;
+/* ---------- 平特：澳门 / 香港各一行 12 格 + 合计，右侧组合注 ---------- */
+.flatbody{display:grid;grid-template-columns:minmax(0,1fr) clamp(200px,22vw,336px);
+ gap:8px;padding:6px}
+.zrows{display:flex;flex-direction:column;gap:4px;min-width:0}
+.zrow{display:grid;grid-template-columns:clamp(38px,3.6vw,56px) repeat(12,minmax(0,1fr)) auto;
+ gap:2px;align-items:stretch}
+.zmk{display:flex;align-items:center;font-size:clamp(11px,1.05vw,12.5px);font-weight:800;
+ color:#374151}
+.zcell{background:var(--card);border:1px solid var(--bd2);border-radius:3px;
+ display:flex;flex-direction:column;align-items:center;padding:2px 1px;min-width:0}
+.zcell .z{font-size:clamp(11px,1.05vw,13px);font-weight:800;color:var(--blue)}
+.zcell .a{font-size:clamp(10.5px,1vw,13px);font-weight:800;color:var(--red);
  font-variant-numeric:tabular-nums;white-space:nowrap}
-.csum{font-size:14px;font-weight:800;color:#111827;padding:9px 12px;
- background:#fafbfc;border-bottom:1px solid var(--bd2)}
+.zcell .a.zero{color:var(--grey)}
+.ztot{display:flex;align-items:center;padding-left:8px;font-size:clamp(13px,1.35vw,16px);
+ font-weight:800;color:var(--red);white-space:nowrap;font-variant-numeric:tabular-nums}
+/* 组合注：内容可滚，合计钉在右下角不动 */
+.combo{display:flex;flex-direction:column;border:1px solid var(--bd2);border-radius:3px;
+ background:var(--card);min-width:0;max-height:clamp(120px,15vh,190px)}
+.combo-list{flex:1 1 auto;overflow:auto;padding:4px 6px}
+.combo-empty{color:var(--dim);font-size:12px;padding:8px 4px}
+.crow{display:flex;align-items:baseline;gap:6px;padding:1px 0}
+.clb{font-size:clamp(11px,1vw,12.5px);font-weight:800;white-space:nowrap}
+.czs{font-size:clamp(11px,1vw,12.5px);font-weight:800;color:#111827;
+ overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.camt{margin-left:auto;font-size:clamp(11px,1vw,12.5px);font-weight:800;color:var(--red);
+ white-space:nowrap;font-variant-numeric:tabular-nums}
+.combo-sum{flex:0 0 auto;border-top:1px solid var(--bd2);padding:3px 8px;text-align:right;
+ font-size:clamp(11px,1.05vw,12.5px);font-weight:800;color:var(--red);
+ font-variant-numeric:tabular-nums;background:#fbfcfd}
 
-.foot{margin-top:10px;color:#98a1ad;font-size:12px;padding-left:2px}
-.mini{display:inline-block;padding:1px 7px;border-radius:10px;font-size:12px;
- border:1px solid var(--bd2);color:var(--dim);background:#fafbfc}
+/* ---------- 最近记账 / 消息 / 排序 表 ---------- */
+.recbar{display:flex;gap:8px;align-items:center;padding:6px 8px;flex-wrap:wrap;
+ border-bottom:1px solid var(--bd2);background:#fcfcfd}
+.recbar .lbl{font-size:12px;color:var(--dim)}
+.hint{font-size:12px;color:var(--dim)}
+table{width:100%;border-collapse:collapse;font-size:clamp(11.5px,1.05vw,13px)}
+th{text-align:left;background:var(--head);color:#333d4b;font-weight:700;padding:5px 7px;
+ border-bottom:1px solid var(--bd);white-space:nowrap}
+td{padding:5px 7px;border-bottom:1px solid var(--bd2);vertical-align:middle}
+td.num2{font-variant-numeric:tabular-nums;white-space:nowrap}
+td.txt{color:#5b6675;word-break:break-all}
+td.who{white-space:nowrap;color:var(--blue);font-weight:700}
+.tr{text-align:right}
+.tc{text-align:center}
+.hot{color:var(--red);font-weight:700}
+.done{color:#9aa0a6}
+.empty{color:var(--dim);text-align:center;padding:16px 0;font-size:12.5px}
+.scroll{overflow:auto;max-height:clamp(200px,30vh,340px)}
+.oplink{color:var(--blue);cursor:pointer;font-weight:700;white-space:nowrap}
+.oplink:hover{text-decoration:underline}
+.oplink.off{color:#9aa0a6;cursor:default;text-decoration:none}
+.mini{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11.5px;
+ border:1px solid var(--bd2);color:var(--dim);background:var(--card);white-space:nowrap}
 .mini.bad{color:var(--red);border-color:#e3b3ae;background:#fdf4f3}
 .mini.ok{color:var(--green);border-color:#b7d9c7;background:#f2faf5}
 
-.lstbar{display:flex;gap:8px;align-items:center;padding:7px 10px;
- border-bottom:1px solid var(--bd2);flex-wrap:wrap;background:#fcfcfd}
-#lstSearch{border:1px solid var(--bd);border-radius:4px;padding:5px 8px;
- font-size:12.5px;width:240px;outline:none}
-#lstSearch:focus{border-color:#9aa8ba}
-#lstKind{border:1px solid var(--bd);border-radius:4px;padding:5px 6px;
- font-size:12.5px;background:#fff;color:var(--ink);outline:none;cursor:pointer}
-#accSel{border:1px solid var(--bd);border-radius:4px;padding:5px 6px;
- font-size:12.5px;background:#fff;color:var(--ink);outline:none;cursor:pointer}
-#lstBody{max-height:360px;overflow:auto}
-td.ck{width:34px;text-align:center}
-td.kind{white-space:nowrap}
-td.wxid{color:#8a929e;font-size:11.5px;word-break:break-all;max-width:280px}
+/* ---------- 消息视图（点「本期未解析」进来，与 GUI 消息页对齐） ---------- */
+#viewMsg{display:none}
+.msgbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 10px;
+ border-bottom:1px solid var(--bd2);background:#fcfcfd}
+.msghead{font-size:14px;font-weight:700;color:#111827;margin-bottom:8px}
+.err{color:var(--red)}
 
-@media (max-width:900px){
-  .grid2{grid-template-columns:1fr}
-  .row{grid-template-columns:26px repeat(5,1fr)}
+/* ---------- 自适应 ---------- */
+@media (max-width:1180px){
+  .main{grid-template-columns:1fr}
+  .right{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+}
+@media (max-width:860px){
+  .boards{grid-template-columns:1fr}
+  .right{grid-template-columns:1fr}
+  .flatbody{grid-template-columns:1fr}
+  .combo{max-height:none}
 }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <div class="bar">
-    <div class="title">记账中台</div>
-    <div class="sumbox">
-      <span class="sum-l">本期金额</span>
-      <span class="sum" id="grand">0</span>
-    </div>
-    <div class="chip">本期 <b id="issue">—</b><span id="closeInfo"></span></div>
-    <div class="chip">生肖年 <b id="zyear">—</b></div>
-    <div class="chip">有注号码 <b id="kbets">—</b></div>
-    <div class="chip">本期已记账 <b id="krec">—</b></div>
-    <div class="chip">今日未解析 <b id="kunp">—</b></div>
-    <div class="sp"></div>
-    <select id="accSel" onchange="switchAcc(this.value)" style="display:none"></select>
-    <div class="chip" id="meta">—</div>
-    <div class="chip">备份 / 清空请在桌面控制台操作</div>
-    <a class="btn" href="/manual" style="text-decoration:none">手工记账</a>
-    <button class="btn" onclick="load()">刷新</button>
-  </div>
-
-  <div class="grid2">
-    <div class="panel">
-      <div class="ph">号码盘 <span id="gridHint">按生肖分行 · 号码底色为波色</span></div>
-      <div class="rows" id="grid"></div>
+  <!-- ===== 总览（与 GUI 概览页同样的块） ===== -->
+  <div id="viewBoard">
+    <div class="topbar">
+      <div class="sumwrap"><span class="sum-l">总金额</span><span class="sum" id="grand">0</span></div>
+      <span class="chip">本期 <b id="issue">—</b><span id="closeInfo"></span></span>
+      <span class="chip">生肖年 <b id="zyear">—</b></span>
+      <span class="chip">号码盘 <b id="desk">0</b></span>
+      <span class="chip">平特 <b id="flat">0</b></span>
+      <span class="chip">本期已记账 <b id="krec">0</b></span>
+      <span class="chip" id="unpChip" title="点这里看是哪几条消息">本期未解析 <b id="kunp">0</b></span>
+      <span class="grow"></span>
+      <a class="btn" href="/manual" target="_blank">手工记账</a>
+      <span class="chip">账号</span>
+      <select class="sel" id="accSel" onchange="switchAcc(this.value)"></select>
     </div>
 
-    <div class="panel">
-      <div class="ph">总额大小排序 <span>风险值</span></div>
-      <div id="risk"></div>
+    <div class="main">
+      <div class="left">
+        <div class="boards">
+          <section class="panel">
+            <div class="ph">澳门 号码盘</div>
+            <div class="tb" id="tbMO"></div>
+          </section>
+          <section class="panel">
+            <div class="ph">香港 号码盘</div>
+            <div class="tb" id="tbHK"></div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <div class="ph">平特</div>
+          <div class="flatbody">
+            <div class="zrows" id="zrows"></div>
+            <div class="combo">
+              <div class="combo-list" id="comboList"></div>
+              <div class="combo-sum" id="comboSum"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="ph">最近记账</div>
+          <div class="recbar">
+            <span class="lbl">账期</span>
+            <select class="sel" id="recScope" onchange="onScope(this.value)"></select>
+            <span class="hint" id="recHint">—</span>
+          </div>
+          <div class="scroll" id="recBody"></div>
+        </section>
+      </div>
+
+      <div class="right">
+        <section class="panel">
+          <div class="ph">澳门 总额排序</div>
+          <div class="scroll" id="riskMO"></div>
+        </section>
+        <section class="panel">
+          <div class="ph">香港 总额排序</div>
+          <div class="scroll" id="riskHK"></div>
+        </section>
+      </div>
     </div>
   </div>
 
-  <div class="grid2e" style="margin-top:10px">
-    <div class="panel">
-      <div class="ph">生肖金额表 · 澳门 <span>平特 + 连肖 合并一列</span></div>
-      <div id="zxbMO"></div>
-    </div>
-    <div class="panel">
-      <div class="ph">生肖金额表 · 香港 <span>平特 + 连肖 合并一列</span></div>
-      <div id="zxbHK"></div>
-    </div>
+  <!-- ===== 消息（点顶栏「本期未解析」进来） ===== -->
+  <div id="viewMsg">
+    <section class="panel">
+      <div class="msgbar">
+        <button class="btn" onclick="backToBoard()">← 返回总览</button>
+        <span class="msghead" id="msgHead">收到的消息</span>
+        <span class="lbl" style="font-size:12px;color:var(--dim)">账期</span>
+        <select class="sel" id="msgScope" onchange="onMsgScope(this.value)"></select>
+        <span class="hint" id="msgHint">—</span>
+        <span class="grow" style="flex:1"></span>
+        <button class="btn" onclick="load()">刷新</button>
+      </div>
+      <div class="scroll" id="msgBody" style="max-height:none"></div>
+    </section>
   </div>
 
-  <div class="panel" style="margin-top:10px">
-    <div class="ph">组合注 <span>整注，不摊到单肖 · 港澳合并 · 同类合并</span></div>
-    <div id="zxbCombo"></div>
-  </div>
-
-  <div class="panel" style="margin-top:10px">
-    <div class="ph">最近记账 <span>最新在上</span></div>
-    <div id="recent"></div>
-  </div>
-
-  <div class="panel" style="margin-top:10px">
-    <div class="ph">监听对象 <span id="lstMeta">—</span></div>
-    <div class="lstbar">
-      <input id="lstSearch" placeholder="搜索群名 / 好友 / 微信号" oninput="renderList()">
-      <select id="lstKind" onchange="renderList()">
-        <option value="">全部类型</option>
-        <option value="群">群</option>
-        <option value="好友">好友</option>
-        <option value="公众号">公众号</option>
-      </select>
-      <span class="chip">已勾选 <b id="lstSel">0</b> 个</span>
-      <div class="sp"></div>
-      <button class="btn" onclick="loadContacts()">刷新清单</button>
-      <button class="btn" onclick="saveTargets()">保存并下发</button>
-    </div>
-    <div id="lstBody"><div class="empty">正在读取…</div></div>
-  </div>
-
-  <div class="panel" style="margin-top:10px">
-    <div class="ph">未解析（需人工核对） <span>原文已留在 unparsed.jsonl</span></div>
-    <div id="unparsed"></div>
-  </div>
-
-  <div class="foot">每 5 秒自动刷新 · 数据来自 WxPushTool 的微信推送</div>
 </div>
 
 <script>
+/* ------------------------------------------------------------------
+   数据来源：GET /api/board —— 服务端用 msb_view.summary 算，和桌面控制台
+   是同一个函数，所以网页和 GUI 的数字不会各算各的。
+   撤销：POST /api/board/reverse（只认本机来源，与控制台 /api/reverse 同一套账务逻辑）
+------------------------------------------------------------------ */
+let ACC = new URLSearchParams(location.search).get('account') || '';
+let S = null;            // 最近一次接口数据
+let SEL = '';            // 当前账期
+let MGSEL = '';          // 消息页账期
+let VIEW = 'board';
+let SCOPES = [];         // [{label, issue}]
+
 function fmt(v){
   const n = Number(v || 0);
   if (!n) return '0';
@@ -207,115 +273,56 @@ function numClass(color){
   if (color === '绿波') return 'g';
   return 'n';
 }
+function issueOf(m){ return String(m.issue || ''); }
+function bySel(rows, sel){
+  return (rows || []).filter(x => issueOf(x) === sel);
+}
 
-// ---------- 账号切换 ----------
-// 空串 = 所有账号合计的总览；选了具体账号 = 只看这个号的账本和监听配置。
-// 监听对象是按账号分开的，所以配置前必须先选账号。
-// 支持 /?account=xxx 直接进单号视图（方便单独收藏某一个号的看板）。
-let ACC = new URLSearchParams(location.search).get('account') || '';
-
-function fillAccounts(list){
+/* ---------- 账号下拉 ---------- */
+function syncAccounts(list){
   const sel = document.getElementById('accSel');
-  if (!list || !list.length){ sel.style.display = 'none'; return; }
-  if (list.length === 1){
-    // 只有一个账号：合计就等于它，不用让用户选；但监听对象必须按账号读
-    sel.style.display = 'none';
-    if (ACC !== list[0]){ ACC = list[0]; loadContacts(); }
-    return;
-  }
-  if (sel.dataset.n === String(list.length)) return;
-  sel.dataset.n = String(list.length);
+  const want = (list || []).slice();
+  if (sel.dataset.n === want.join('|')) { sel.value = ACC; return; }
+  sel.dataset.n = want.join('|');
   sel.innerHTML = '<option value="">全部账号（合计）</option>' +
-    list.map(a => '<option value="' + esc(a) + '">' + esc(a) + '</option>').join('');
-  sel.style.display = '';
+    want.map(a => '<option value="' + esc(a) + '">' + esc(a) + '</option>').join('');
   sel.value = ACC;
 }
-
 function switchAcc(v){
   ACC = v || '';
+  SEL = ''; MGSEL = '';
   load();
-  loadContacts();
 }
 
-// ---------- 生肖金额表 / 组合注（只读展示） ----------
-// 数据由 /api/dashboard 的 zodiac_board 给：港澳各一份，平特与连肖已合并成一列。
-function renderZxBoard(id, b){
-  const el = document.getElementById(id);
-  if (!b || !b.rows || !b.rows.length){
-    el.innerHTML = '<div class="empty">暂无数据</div>';
-    return;
-  }
-  const has = b.rows.some(r => Number(r.amount) > 0);
-  el.innerHTML = `<table>
-    <tr><th style="width:78px">生肖</th><th>号码</th><th class="tr" style="width:190px">金额</th></tr>
-    ${b.rows.map(r => {
-      const amt = Number(r.amount || 0);
-      return `<tr>
-        <td class="zname">${esc(r.zodiac)}</td>
-        <td class="znums">${esc(r.nums)}</td>
-        <td class="num2 tr zamt ${amt > 0 ? 'hot' : ''}">${fmt(amt)}
-          ${amt > 0 ? `<div class="mini">平特 ${fmt(r.pingte)} · 连肖 ${fmt(r.lianxiao)}</div>` : ''}</td>
-      </tr>`;
-    }).join('')}
-    <tr><td class="zname2">合计</td><td class="znums"></td>
-      <td class="num2 tr zamt hot">${fmt(b.totals && b.totals.board)}</td></tr>
-  </table>${has ? '' : '<div class="empty" style="padding:8px 0 10px">本期还没有平特 / 连肖的注</div>'}`;
-}
-
-/* 组合注：一行一种玩法，同类同生肖合并，港澳合并；有注才出现 */
-/* 颜色按完整玩法名；首字兜底，认不出的玩法回蓝色 —— 以后加别的组合不用改这里 */
-const ZHONG_CLR = {'二中二':'#1f6feb', '三中二':'#0e7490', '三中三':'#7c3aed',
-                   '四中四':'#c2410c', '五中五':'#c0392b', '六中六':'#0f766e'};
-const ZHONG_CLR_HEAD = {二:'#1f6feb', 三:'#7c3aed', 四:'#c2410c', 五:'#c0392b', 六:'#0f766e'};
-const ZHONG_RANK = {二:2, 三:3, 四:4, 五:5, 六:6};
-const ZS_ORDER = '鼠牛虎兔龙蛇马羊猴鸡狗猪'.split('');
-
-function renderCombo(list){
-  const el = document.getElementById('zxbCombo');
-  if (!list || !list.length){
-    el.innerHTML = '<div class="empty">本期还没有组合注</div>';
-    return;
-  }
-  // 同 label + 同生肖组合的合成一笔
-  const agg = {};
-  list.forEach(function (x) {
-    const lb = String(x.label || '二中二');
-    const zs = (x.zodiacs || []).filter(Boolean);
-    const key = lb + '|' + zs.slice().sort(function (a, b) {
-      return ZS_ORDER.indexOf(a) - ZS_ORDER.indexOf(b);
-    }).join('');
-    if (!agg[key]) agg[key] = {label: lb, zodiacs: zs, amount: 0};
-    agg[key].amount += Number(x.amount || 0);
+/* ---------- 账期下拉（本期 / 前一期 / 前二期，与 GUI 同一份选项） ---------- */
+function syncScopes(list, cur){
+  SCOPES = (list && list.length) ? list : [{label:'本期 ' + (cur || '—'), issue: cur || ''}];
+  const sig = SCOPES.map(x => x.label).join('|');
+  ['recScope','msgScope'].forEach(function(id){
+    const el = document.getElementById(id);
+    if (el.dataset.sig === sig) return;
+    el.dataset.sig = sig;
+    el.innerHTML = SCOPES.map(x =>
+      '<option value="' + esc(x.issue) + '">' + esc(x.label) + '</option>').join('');
   });
-  const rows = Object.values(agg).sort(function (a, b) {
-    const ra = ZHONG_RANK[a.label[0]] || 9, rb = ZHONG_RANK[b.label[0]] || 9;
-    if (ra !== rb) return ra - rb;
-    const za = a.zodiacs.map(z => ZS_ORDER.indexOf(z)).join(',');
-    const zb2 = b.zodiacs.map(z => ZS_ORDER.indexOf(z)).join(',');
-    return za.localeCompare(zb2);
-  });
-  let total = 0;
-  el.innerHTML = rows.map(function (g) {
-    total += g.amount;
-    const clr = ZHONG_CLR[g.label] || ZHONG_CLR_HEAD[g.label[0]] || 'var(--blue)';
-    return `<div class="cbox">
-      <span class="clb" style="color:${clr}">${esc(g.label)} ：</span>
-      <span class="czs">${esc(g.zodiacs.join('+'))}</span>
-      <span class="camt">共 ${fmt(g.amount)} 元</span>
-    </div>`;
-  }).join('') + `<div class="csum">合计：${fmt(total)} 元</div>`;
+  const okS = SCOPES.some(x => x.issue === SEL);
+  if (!SEL || !okS) SEL = SCOPES[0].issue;
+  const okM = SCOPES.some(x => x.issue === MGSEL);
+  if (!MGSEL || !okM) MGSEL = SEL;
+  document.getElementById('recScope').value = SEL;
+  document.getElementById('msgScope').value = MGSEL;
 }
+function onScope(v){ SEL = v; renderRec(); }
+function onMsgScope(v){ MGSEL = v; renderMsg(); }
 
-// 开奖时间封盘。剩余秒数由服务端给，本地每秒减 —— 不信任客户端时钟。
-let CUT = {left: 0, draw: '', closed: true};
-
+/* ---------- 开奖时间封盘 ---------- */
+let CUT = {left:0, draw:'', closed:true};
 function fmtLeft(s){
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   if (h > 0) return h + ' 小时 ' + (m > 0 ? m + ' 分' : '');
   if (m > 0) return m + ' 分';
   return s + ' 秒';
 }
-
 function paintCutoff(){
   const el = document.getElementById('closeInfo');
   if (!el) return;
@@ -327,12 +334,6 @@ function paintCutoff(){
     el.textContent = ' · ' + CUT.draw + ' 截止（剩 ' + fmtLeft(CUT.left) + '）';
   }
 }
-
-function setCutoff(d){
-  CUT = {left: Number(d.seconds_left || 0), draw: d.draw_time || '', closed: !!d.closed};
-  paintCutoff();
-}
-
 setInterval(function(){
   if (CUT.left > 0){
     CUT.left -= 1;
@@ -341,220 +342,262 @@ setInterval(function(){
   }
 }, 1000);
 
-async function load(){
-  try{
-    const r = await fetch('/api/dashboard' + (ACC ? '?account=' + encodeURIComponent(ACC) : ''));
-    const d = await r.json();
-    fillAccounts(d.accounts);
-
-    document.getElementById('grand').textContent = fmt(d.grand_total);
-    document.getElementById('issue').textContent = d.issue || '—';
-    setCutoff(d);
-    document.getElementById('zyear').textContent = (d.zodiac_year || '—') + '年';
-    document.getElementById('kbets').textContent = d.numbers_with_bets;
-    document.getElementById('krec').textContent =
-      (d.records_current === undefined ? d.records_today : d.records_current);
-    document.getElementById('kunp').textContent = d.unparsed_today;
-    document.getElementById('meta').innerHTML =
-      (d.account ? '账号 ' + esc(d.account) : '全部账号合计') + ' · ' +
-      esc(d.model) + ' · ' + (d.verify_enabled ? '验签开' : '验签跳') +
-      ' · ' + esc(d.server_time);
-
-    if (!d.grid.length){
-      document.getElementById('grid').innerHTML = '<div class="empty">暂无号码表</div>';
-    } else {
-      document.getElementById('grid').innerHTML = d.grid.map(row => `
-        <div class="row">
-          <div class="zod">${esc(row.zodiac)}</div>
-          ${row.cells.map(c => `
-            <div class="cell">
-              <span class="num ${numClass(c.color)}">${esc(c.num)}</span>
-              <span class="amt ${c.amount > 0 ? 'has' : ''}">${fmt(c.amount)}</span>
-            </div>`).join('')}
-        </div>`).join('');
-    }
-
-    if (!d.risk.length){
-      document.getElementById('risk').innerHTML = '<div class="empty">暂无数据</div>';
-    } else {
-      document.getElementById('risk').innerHTML = `<table>
-        <tr><th>序</th><th>号码</th><th>生肖</th><th class="tr">金额</th><th class="tr">占比</th></tr>
-        ${d.risk.map(x => `<tr>
-          <td class="num2">${x.rank}</td>
-          <td class="num2">${esc(x.num)}</td>
-          <td>${esc(x.zodiac)}</td>
-          <td class="num2 tr ${x.rank === 1 ? 'hot' : ''}">${fmt(x.amount)}</td>
-          <td class="num2 tr">${x.share}%</td>
-        </tr>`).join('')}
-      </table>`;
-    }
-
-    const zb = d.zodiac_board || {};
-    renderZxBoard('zxbMO', zb.MO);
-    renderZxBoard('zxbHK', zb.HK);
-    // 组合注按「玩法 + 生肖组合」合并，港澳算一份：同类同肖的注金额加在一起
-    let combo = [];
-    ['MO', 'HK'].forEach(function (m) {
-      ((zb[m] || {}).combo_groups || []).forEach(function (x) {
-        combo.push(Object.assign({}, x));
-      });
-    });
-    renderCombo(combo);
-
-    if (!d.recent.length){
-      document.getElementById('recent').innerHTML = '<div class="empty">还没有记账</div>';
-    } else {
-      document.getElementById('recent').innerHTML = `<table>
-        <tr><th>时间</th><th>会话</th><th>发送人</th><th>原文</th><th class="tr">号码</th><th class="tr">本单</th><th class="tr">累计</th></tr>
-        ${d.recent.map(x => `<tr>
-          <td class="num2">${esc(x.ts)}</td>
-          <td>${esc(x.chat)}</td>
-          <td class="who">${esc(x.sender_name || x.sender || '')}</td>
-          <td class="txt">${esc(x.text)}</td>
-          <td class="num2 tr">${x.numbers || 0}</td>
-          <td class="num2 tr">${fmt(x.total)}</td>
-          <td class="num2 tr">${fmt(x.grand_total)}</td>
-        </tr>`).join('')}
-      </table>`;
-    }
-
-    if (!d.unparsed_recent.length){
-      document.getElementById('unparsed').innerHTML = '<div class="empty">没有未解析的单</div>';
-    } else {
-      document.getElementById('unparsed').innerHTML = `<table>
-        <tr><th>时间</th><th>会话</th><th>原文</th><th>原因</th></tr>
-        ${d.unparsed_recent.map(x => `<tr>
-          <td class="num2">${esc(x.ts)}</td>
-          <td>${esc(x.chat)}</td>
-          <td class="txt">${esc(x.text)}</td>
-          <td><span class="mini bad">${esc(x.reason)}</span></td>
-        </tr>`).join('')}
-      </table>`;
-    }
-  }catch(e){
-    document.getElementById('meta').textContent = '刷新失败：' + e;
-  }
+/* ---------- 顶栏 ---------- */
+function renderTop(){
+  const d = S;
+  document.getElementById('grand').textContent = fmt(d.grand_total);
+  document.getElementById('issue').textContent = d.issue || '—';
+  document.getElementById('zyear').textContent =
+    (d.zodiac_year || '—') + '年' + (d.zodiac ? ' · ' + d.zodiac : '');
+  document.getElementById('desk').textContent = fmt(d.grand_total);
+  document.getElementById('flat').textContent = fmt(d.flat_total);
+  document.getElementById('krec').textContent = d.records_current || 0;
+  document.getElementById('kunp').textContent = unparsedCount();
 }
 
-async function act(path){
-  try{
-    const r = await fetch(path, {method:'POST'});
-    await r.json();
-    load();
-  }catch(e){ alert('操作失败：' + e); }
+/* 未解析数：与 GUI 一样从消息流水里数（result=未解析 且属于当前账期），
+   拿不到流水时才退回服务端给的 unparsed_current */
+function unparsedCount(){
+  const rows = bySel(S.messages, SEL);
+  if (!rows.length) return (SEL === S.issue ? (S.unparsed_current || 0) : 0);
+  return rows.filter(m => String(m.result || '') === '未解析').length;
 }
 
-// 备份 / 清空不放在网页看板上：这两个接口要控制台令牌，浏览器拿不到。
-// 看板只负责看数，动账的操作都在桌面控制台里。
-
-// ---------- 监听对象 ----------
-// 清单由采集端上报（只含「有过会话」的对象）；勾选结果存 id、version+1 后
-// 由采集端拉走。5 秒自动刷新不碰这个区块，避免把用户正在勾的选择冲掉。
-let LST = {items: []};
-
-async function loadContacts(){
-  const box = document.getElementById('lstBody');
-  if (!ACC){
-    // 监听配置是按账号分开的，"全部账号合计"视图下没法勾
-    LST.items = [];
-    document.getElementById('lstMeta').textContent = '未选择账号';
-    box.innerHTML = '<div class="empty">监听对象按微信号分开配置。' +
-      '请先在右上角选择一个账号（只有一个账号时会自动选中）。</div>';
-    updateSelCount();
+/* ---------- 号码盘（生肖列 + 5 列号码，最后一列放本盘合计） ---------- */
+function renderBoard(mk){
+  const el = document.getElementById('tb' + mk);
+  const rows = (S.grids || {})[mk] || [];
+  if (!rows.length){
+    el.innerHTML = '<div class="empty" style="grid-column:1/-1">暂无号码表</div>';
     return;
   }
-  try{
-    const r = await fetch('/api/contacts?account=' + encodeURIComponent(ACC));
-    const d = await r.json();
-    if (!d.ok){
-      box.innerHTML = '<div class="empty">' + esc(d.error || '不可用') + '</div>';
+  let html = '', total = 0;
+  rows.forEach(function(r, ri){
+    const R = ri + 1;
+    // 每个格子都写死行列：靠自动流的话，被「本盘合计」占住的第 6 列会把后面的
+    // 格子顶前一位，整盘错行（踩过）。
+    html += '<div class="zb" style="grid-row:' + R + ';grid-column:1">' +
+      esc(r.zodiac) + '</div>';
+    const cells = r.cells || [];
+    for (let c = 0; c < 5; c++){
+      const cell = cells[c];
+      if (!cell) continue;   // 只有 4 个号的行，第 5 格空着 —— 与 GUI 一样不画框
+      total += Number(cell.amount || 0);
+      html += '<div class="cell" style="grid-row:' + R + ';grid-column:' + (c + 2) + '">' +
+        '<span class="num ' + numClass(cell.color) + '">' + esc(cell.num) + '</span>' +
+        '<span class="amt' + (cell.amount > 0 ? ' has' : '') + '">' +
+        (cell.amount > 0 ? fmt(cell.amount) : '') + '</span></div>';
+    }
+  });
+  // 本盘合计只加盘面上这些号的钱（平特 / 连肖 / 组合注不在 49 号盘里），
+  // 位置固定在最后一列第二行往下，像 GUI 那样竖着占满那一列的空白
+  html += '<div class="psum" style="grid-row:2 / span 11;grid-column:6">' +
+    '<span class="lb">本盘合计</span><span class="v">' + fmt(total) + '</span></div>';
+  el.innerHTML = html;
+}
+
+/* ---------- 平特：生肖 12 格 + 合计；组合注在右侧 ---------- */
+const ZHONG_CLR = {'二中二':'#1f6feb','三中二':'#0e7490','三中三':'#7c3aed',
+                   '四中四':'#c2410c','五中五':'#c0392b','六中六':'#0f766e'};
+const ZHONG_RANK = {二:2, 三:3, 四:4, 五:5, 六:6};
+const ZS_ORDER = '鼠牛虎兔龙蛇马羊猴鸡狗猪'.split('');
+
+function renderFlat(){
+  const zb = S.zodiac_board || {};
+  const rowsEl = document.getElementById('zrows');
+  let html = '';
+  let comboAgg = {};
+  ['MO','HK'].forEach(function(mk){
+    const b = zb[mk] || {};
+    const rows = b.rows || [];
+    html += '<div class="zrow"><div class="zmk">' + (mk === 'MO' ? '澳门' : '香港') + '</div>';
+    ZS_ORDER.forEach(function(z, i){
+      const row = rows[i] || {};
+      const amt = Number(row.amount || 0);
+      html += '<div class="zcell"><span class="z">' + esc(z) + '</span><span class="a' +
+        (amt ? '' : ' zero') + '">' + (amt ? fmt(amt) : '0') + '</span></div>';
+    });
+    html += '<div class="ztot">合计 ' + fmt((b.totals || {}).board) + '</div></div>';
+    // 组合注：港澳合并，同类同生肖合成一笔
+    (b.combo_groups || []).forEach(function(g){
+      const lb = String(g.label || '二中二');
+      const zs = (g.zodiacs || []).filter(Boolean);
+      const key = lb + '|' + zs.slice().sort((x, y) =>
+        ZS_ORDER.indexOf(x) - ZS_ORDER.indexOf(y)).join('');
+      if (!comboAgg[key]) comboAgg[key] = {label: lb, zodiacs: zs, amount: 0};
+      comboAgg[key].amount += Number(g.amount || 0);
+    });
+  });
+  rowsEl.innerHTML = html;
+
+  const list = Object.values(comboAgg).sort(function(a, b){
+    const ra = ZHONG_RANK[a.label[0]] || 9, rb = ZHONG_RANK[b.label[0]] || 9;
+    if (ra !== rb) return ra - rb;
+    return a.zodiacs.map(z => ZS_ORDER.indexOf(z)).join(',')
+      .localeCompare(b.zodiacs.map(z => ZS_ORDER.indexOf(z)).join(','));
+  });
+  let total = 0;
+  document.getElementById('comboList').innerHTML = list.length ? list.map(function(g){
+    total += g.amount;
+    const clr = ZHONG_CLR[g.label] || ZHONG_CLR[g.zodiacs[0]] || 'var(--blue)';
+    return '<div class="crow"><span class="clb" style="color:' + clr + '">' +
+      esc(g.label) + '：</span><span class="czs">' +
+      esc(g.zodiacs.join('+') || '—') + '</span><span class="camt">共' +
+      fmt(g.amount) + '元</span></div>';
+  }).join('') : '<div class="combo-empty">组合注：本期没有</div>';
+  document.getElementById('comboSum').textContent = list.length
+    ? ('合计：' + fmt(total) + ' 元') : '';
+}
+
+/* ---------- 总额排序（两本，序 / 号码 / 生肖 / 金额 / 占比） ---------- */
+function renderRisk(){
+  ['MO','HK'].forEach(function(mk){
+    const el = document.getElementById('risk' + mk);
+    const rows = (S.risks || {})[mk] || [];
+    if (!rows.length){
+      el.innerHTML = '<div class="empty">本期这盘还没有下注</div>';
       return;
     }
-    // 排序：群 > 好友 > 文件助手 > 公众号，同类按最近消息倒序。
-    // 公众号可能上百个，若不留神会占满第一屏，把真正想监听的群冲下去。
-    const ORDER = {'群': 0, '好友': 1, '文件助手': 2, '公众号': 3};
-    LST.items = (d.items || []).slice().sort((a, b) =>
-      ((ORDER[a.kind] != null ? ORDER[a.kind] : 9) - (ORDER[b.kind] != null ? ORDER[b.kind] : 9))
-      || ((b.last_msg_time || 0) - (a.last_msg_time || 0)));
-    document.getElementById('lstMeta').innerHTML =
-      (d.received_at ? '清单同步 ' + esc(d.received_at) : '采集端尚未上报') +
-      ' · 下发版本 v' + (d.targets_version || 0) +
-      ' · 生效中 ' + (d.targets_count || 0) + ' 个';
-    renderList();
-  }catch(e){
-    box.innerHTML = '<div class="empty">读取失败：' + esc(e) + '</div>';
-  }
+    el.innerHTML = '<table><tr><th class="tc">序</th><th class="tc">号码</th>' +
+      '<th class="tc">生肖</th><th class="tr">金额</th><th class="tr">占比</th></tr>' +
+      rows.map(x => '<tr><td class="num2 tc">' + x.rank + '</td>' +
+        '<td class="num2 tc">' + esc(x.num) + '</td>' +
+        '<td class="tc">' + esc(x.zodiac) + '</td>' +
+        '<td class="num2 tr' + (x.rank === 1 ? ' hot' : '') + '">' + fmt(x.amount) + '</td>' +
+        '<td class="num2 tr">' + x.share + '%</td></tr>').join('') + '</table>';
+  });
 }
 
-function renderList(){
-  const box = document.getElementById('lstBody');
-  const kw = (document.getElementById('lstSearch').value || '').trim().toLowerCase();
-  const all = LST.items;
+/* ---------- 最近记账：账期 + 统计 + 8 列表格（含撤销） ---------- */
+function renderRec(){
+  const rows = bySel(S.recent, SEL);
+  const mine = bySel(S.messages, SEL);
+  const ok = mine.filter(m => String(m.result || '') === '记账');
+  const rev = ok.filter(m => m.reversed).length;
+  const test = ok.filter(m => ['规则测试','自检'].includes(String(m.chat || ''))).length;
+  const manual = rows.filter(x => String(x.sender || '') === 'manual'
+    || String(x.chat || x.chat_name || '') === '手工记账').length;
+  document.getElementById('recHint').textContent =
+    (SEL || '—') + ' · 消息记账 ' + ok.length + ' 笔（测试 ' + test + ' · 已撤 ' + rev +
+    '）· 账目 ' + rows.length + ' 笔（手工 ' + manual + '）';
 
-  if (!all.length){
-    box.innerHTML = '<div class="empty">还没有会话清单。采集端（WxPushTool）启动约 5 分钟后自动上报，' +
-      '只包含「有过会话」的对象——从没聊过的联系人监听不到，所以不列出来。</div>';
-    updateSelCount();
+  const el = document.getElementById('recBody');
+  if (!rows.length){
+    el.innerHTML = '<div class="empty">这一期还没有记账</div>';
     return;
   }
-
-  const rows = !kw ? all : all.filter(x =>
-    ((x.name || '') + ' ' + (x.chat_id || '') + ' ' + (x.kind || '') + ' ' + (x.alias || ''))
-      .toLowerCase().indexOf(kw) >= 0);
-
-  const kind = document.getElementById('lstKind').value;
-  const shown = kind ? rows.filter(x => (x.kind || '') === kind) : rows;
-
-  if (!shown.length){
-    box.innerHTML = '<div class="empty">没有匹配的对象</div>';
-    updateSelCount();
-    return;
-  }
-
-  box.innerHTML = `<table>
-    <tr><th class="ck"></th><th>名称</th><th>类型</th><th>微信ID</th><th class="tr">最近消息</th></tr>
-    ${shown.map(x => `<tr>
-      <td class="ck"><input type="checkbox" class="ckbox" data-id="${esc(x.chat_id)}"
-        ${x.selected ? 'checked' : ''} onchange="updateSelCount()"></td>
-      <td>${esc(x.name)}</td>
-      <td class="kind"><span class="mini ${x.kind === '群' ? 'ok' : ''}">${esc(x.kind || '')}</span></td>
-      <td class="wxid">${esc(x.chat_id)}</td>
-      <td class="num2 tr">${x.last_msg_time
-        ? esc(new Date(x.last_msg_time * 1000).toLocaleString()) : '—'}</td>
-    </tr>`).join('')}
-  </table>`;
-  updateSelCount();
+  el.innerHTML = '<table><tr><th>时间</th><th>期号</th><th>会话</th><th>发送人</th>' +
+    '<th>原文</th><th class="tr">号码</th><th class="tr">本单</th><th class="tc">操作</th></tr>' +
+    rows.map(function(x){
+      const rid = String(x.msg_id || x.rec_id || '');
+      const done = !!x.reversed;
+      const op = done
+        ? '<span class="oplink off">已撤销</span>'
+        : '<span class="oplink" data-mid="' + esc(rid) + '" onclick="undo(this)">撤销</span>';
+      return '<tr><td class="num2">' + esc(String(x.ts || '').slice(0,16)) + '</td>' +
+        '<td class="num2">' + esc(x.issue || '') + '</td>' +
+        '<td>' + esc(String(x.chat || x.chat_name || '').slice(0,24)) + '</td>' +
+        '<td class="who' + (done ? ' done' : '') + '">' +
+          esc(String(x.sender_name || x.sender || '').slice(0,14)) + '</td>' +
+        '<td class="txt">' + esc(String(x.text || '').slice(0,70)) + '</td>' +
+        '<td class="num2 tr">' + (x.numbers || 0) + '</td>' +
+        '<td class="num2 tr' + (done ? ' done' : '') + '">' + fmt(x.total) + '</td>' +
+        '<td class="tc">' + op + '</td></tr>';
+    }).join('') + '</table>';
 }
 
-function updateSelCount(){
-  const n = document.querySelectorAll('#lstBody input.ckbox:checked').length;
-  document.getElementById('lstSel').textContent = n;
-}
-
-async function saveTargets(){
-  if (!ACC){ alert('请先在右上角选择一个账号，再配置它的监听对象。'); return; }
-  const ids = Array.from(document.querySelectorAll('#lstBody input.ckbox:checked'))
-    .map(e => e.dataset.id).filter(Boolean);
-  if (!ids.length && !confirm('当前没有勾选任何对象，保存后采集端将停止监听所有会话。确定继续？')) {
+/* ---------- 消息页（与 GUI「消息」页同样的列） ---------- */
+function renderMsg(){
+  const rows = bySel(S.messages, MGSEL);
+  const head = document.getElementById('msgHead');
+  const hint = document.getElementById('msgHint');
+  const unp = rows.filter(m => String(m.result || '') === '未解析').length;
+  head.textContent = '收到的消息';
+  hint.textContent = (MGSEL || '—') + ' · 共 ' + rows.length + ' 条 · 未解析 ' + unp + ' 条';
+  const el = document.getElementById('msgBody');
+  if (!rows.length){
+    el.innerHTML = '<div class="empty">这一期还没收到消息</div>';
     return;
   }
+  el.innerHTML = '<table><tr><th>时间</th><th>账号</th><th>会话</th><th>发送人</th>' +
+    '<th>内容</th><th>结果</th></tr>' +
+    rows.map(function(m){
+      const res = String(m.result || '');
+      const reason = String(m.reason || '');
+      const amt = m.amount;
+      let label, cls = '', op = '';
+      if (res === '记账'){
+        label = '记账' + (amt == null ? '' : ' ¥' + fmt(amt));
+        if (m.reversed){ cls = 'done'; label = '已撤销 · 原 ' + label; }
+        else { cls = ''; op = '<span class="oplink" data-mid="' + esc(m.msg_id || '') +
+              '" onclick="undo(this)">撤销</span>'; }
+      } else {
+        label = res + (reason ? ' · ' + (reason.length > 12 ? reason.slice(0,12) + '…' : reason) : '');
+        cls = (res === '未解析') ? 'hot' : 'done';
+      }
+      return '<tr><td class="num2">' + esc(String(m.ts || '').slice(0,16)) + '</td>' +
+        '<td>' + esc(m.account || m.cust || '') + '</td>' +
+        '<td>' + esc(String(m.chat || '').slice(0,24)) + '</td>' +
+        '<td class="who">' + esc(String(m.sender || m.sender_name || '').slice(0,14)) + '</td>' +
+        '<td class="txt">' + esc(String(m.content || m.text || '').slice(0,90)) + '</td>' +
+        '<td class="' + cls + '">' + esc(label) + ' ' + op + '</td></tr>';
+    }).join('') + '</table>';
+}
+
+/* ---------- 视图切换 ---------- */
+function showUnparsed(){
+  VIEW = 'msg';
+  MGSEL = SEL;
+  document.getElementById('viewBoard').style.display = 'none';
+  document.getElementById('viewMsg').style.display = '';
+  document.getElementById('msgScope').value = MGSEL;
+  renderMsg();
+  window.scrollTo(0, 0);
+}
+function backToBoard(){
+  VIEW = 'board';
+  document.getElementById('viewMsg').style.display = 'none';
+  document.getElementById('viewBoard').style.display = '';
+  window.scrollTo(0, 0);
+}
+
+/* ---------- 撤销 ---------- */
+async function undo(el){
+  const mid = el.dataset.mid;
+  if (!mid) return;
+  if (!confirm('确定撤销这一笔账？金额会从账本里减掉，撤销记录会留在流水里。')) return;
   try{
-    const r = await fetch('/api/targets', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({targets: ids, account: ACC})
+    const r = await fetch('/api/board/reverse', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({msg_id: mid})
     });
     const d = await r.json();
-    if (!d.ok){ alert('保存失败：' + (d.error || '未知错误')); return; }
-    alert('已保存 ' + d.count + ' 个监听对象（版本 v' + d.version + '）\n采集端约 60 秒内自动生效。');
-    loadContacts();
+    if (!d.ok){ alert('撤销失败：' + (d.error || '未知错误')); return; }
+    load();
+  }catch(e){ alert('撤销失败：' + e); }
+}
+
+/* ---------- 主循环 ---------- */
+async function load(){
+  try{
+    const r = await fetch('/api/board' + (ACC ? '?account=' + encodeURIComponent(ACC) : ''));
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '读取失败');
+    S = d;
+    syncAccounts(d.accounts);
+    syncScopes(d.issue_options, d.issue);
+    CUT = {left: Number(d.seconds_left || 0), draw: d.draw_time || '', closed: !!d.closed};
+    renderTop(); paintCutoff();
+    renderBoard('MO'); renderBoard('HK');
+    renderFlat(); renderRisk(); renderRec(); renderMsg();
   }catch(e){
-    alert('保存失败：' + e);
+    const el = document.getElementById('recHint');
+    if (el) el.innerHTML = '<span class="err">刷新失败：' + esc(e.message || e) + '</span>';
   }
 }
 
+document.getElementById('unpChip').addEventListener('click', showUnparsed);
 load();
-loadContacts();
 setInterval(load, 5000);
 </script>
 </body>
