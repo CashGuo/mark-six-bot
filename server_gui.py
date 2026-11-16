@@ -1452,12 +1452,12 @@ class MainWindow:
 
         body = tk.Frame(tab, bg=CLR_BG)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        cols = ("wid", "cust", "secret", "expire", "ip", "last", "state")
+        cols = ("wid", "cust", "secret", "expire", "ip", "last", "state", "copy")
         heads = {"wid": "微信号", "cust": "客户", "secret": "密钥",
                  "expire": "有效期至", "ip": "IP 白名单", "last": "最后推送",
-                 "state": "状态"}
+                 "state": "状态", "copy": "API Key"}
         widths = {"wid": 150, "cust": 90, "secret": 140, "expire": 100,
-                  "ip": 130, "last": 140, "state": 80}
+                  "ip": 130, "last": 140, "state": 80, "copy": 80}
         self.tv_wl = ttk.Treeview(body, columns=cols, show="headings", height=12)
         for c in cols:
             self.tv_wl.heading(c, text=heads[c])
@@ -1489,6 +1489,7 @@ class MainWindow:
         self.lb_wl_tip = tk.Label(foot, text="", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED)
         self.lb_wl_tip.pack(side="right")
 
+        self.tv_wl.bind("<Button-1>", self._white_click)
         self.tv_wl.bind("<Double-1>", lambda e: self._white_set(None))
         self.refresh_white()
 
@@ -1541,6 +1542,7 @@ class MainWindow:
             pass
 
         self.tv_wl.delete(*self.tv_wl.get_children())
+        self._wl_plain = {}          # 明文密钥只留在这里，表格里只显示打码尾巴
         row_ids = {}
         for x in rows:
             sec = str(x.get("secret") or "")
@@ -1556,13 +1558,16 @@ class MainWindow:
                         exp_show = exp + "（已过期）"
                 except Exception:
                     pass
+            wid = str(x.get("wechat_id") or "")
             iid = self.tv_wl.insert("", "end", values=(
-                x.get("wechat_id") or "", x.get("customer_id") or "-",
+                wid, x.get("customer_id") or "-",
                 masked, exp_show, str(x.get("ip_allow") or "全放行"),
                 last.get(x.get("wechat_id")) or "-",
                 "● 启用" if on else "○ 已停用",
+                "复制" if sec else "-",
             ), tags=("on" if on else "off",))
-            row_ids[str(x.get("wechat_id") or "")] = iid
+            self._wl_plain[wid] = sec
+            row_ids[wid] = iid
         if keep and keep in row_ids:                 # 操作完把选中还回去
             self.tv_wl.selection_set(row_ids[keep])
             self.tv_wl.focus(row_ids[keep])
@@ -1584,8 +1589,38 @@ class MainWindow:
         elif rows:
             tip = "全部停用中，采集端现在推什么都收不到"
         else:
-            tip = "还没有客户端：点「新增」生成 API Key，填到采集端的「服务端 API Key」"
+            tip = "还没有客户端：点「新增」生成 API Key，填到采集端「配置」页的「服务端 API Key」"
         self.lb_wl_tip.configure(text=tip)
+
+    def _white_click(self, event):
+        """点最右那一列的「复制」= 把这一行的 API Key 放进剪贴板。
+
+        表格里密钥是打码的，客户要的是明文；所以点一下直接进剪贴板，
+        不用先选中再去菜单里翻。第 8 列就是那一列。
+        """
+        try:
+            col = self.tv_wl.identify_column(event.x)
+            row = self.tv_wl.identify_row(event.y)
+        except Exception:
+            return
+        if not row or col != "#8":
+            return
+        try:
+            wid = str(self.tv_wl.item(row, "values")[0] or "")
+        except Exception:
+            return
+        key = (getattr(self, "_wl_plain", None) or {}).get(wid) or ""
+        if not key:
+            self._toast("%s 这一行没有密钥" % (wid or "选中"))
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(key)
+        except Exception as e:
+            self._toast("复制失败：%r" % (e,))
+            return
+        self.tv_wl.selection_set(row)
+        self._toast("已复制 %s 的 API Key（%d 位）" % (wid, len(key)))
 
     def _white_sel(self):
         sel = self.tv_wl.selection()
@@ -1676,17 +1711,18 @@ class MainWindow:
         e_wid = entry(0, v_wid)
         if edit:
             e_wid.configure(state="readonly")
-
-        lab(1, "客户编号")
-        v_cid = tk.StringVar(value=str(row.get("customer_id") or ""))
-        entry(1, v_cid)
+        tk.Label(body, text="填这台采集端登录的微信号 —— 只用来分辨是谁在推，不参与验签，写错不影响推送",
+                 font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED, justify="left",
+                 wraplength=400).grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 0))
 
         lab(2, "有效期至")
-        default_exp = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
-        v_exp = tk.StringVar(value=str(row.get("expire_at") or default_exp))
+        v_exp = tk.StringVar(value=str(row.get("expire_at") or "9999-12-31"))
         entry(2, v_exp)
-        tk.Label(body, text="YYYY-MM-DD，留空 = 不限期。到期后服务端一律拒收，客户端改本地日期也没用",
-                 font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED, justify="left").grid(
+        tk.Label(body, text="YYYY-MM-DD，默认 9999-12-31 = 不限期。到期后服务端一律拒收，"
+                            "客户端改本地日期也没用",
+                 font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED, justify="left",
+                 wraplength=400).grid(
             row=3, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 0))
 
         lab(4, "IP 白名单")
@@ -1708,7 +1744,7 @@ class MainWindow:
                   relief="flat", bd=0, cursor="hand2",
                   command=lambda: v_key.set(secrets.token_hex(32))
                   ).pack(side="left", padx=(6, 0))
-        tk.Label(body, text="把这串复制到采集端的「服务端 API Key」；续期只改日期，不用重新生成",
+        tk.Label(body, text="复制到采集端「配置」页的「服务端 API Key」；续期只改日期，不用重新生成",
                  font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED, justify="left").grid(
             row=7, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
 
@@ -1744,7 +1780,6 @@ class MainWindow:
             for x in clients:
                 if str(x.get("wechat_id") or "") == wid:
                     x["secret"] = key
-                    x["customer_id"] = v_cid.get().strip()
                     x["expire_at"] = exp
                     x["ip_allow"] = ", ".join(parts)
                     x.setdefault("added_at", now)
@@ -1753,7 +1788,6 @@ class MainWindow:
             if not found:
                 clients.append({
                     "wechat_id": wid, "secret": key,
-                    "customer_id": v_cid.get().strip(),
                     "customer": "",
                     "issued_at": datetime.now().strftime("%Y-%m-%d"),
                     "expire_at": exp, "ip_allow": ", ".join(parts),
