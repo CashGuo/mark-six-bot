@@ -25,6 +25,7 @@
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -148,16 +149,18 @@ ACCOUNT_SECRETS = _parse_account_secrets(
     cfg("wx_account_secrets", "WX_ACCOUNT_SECRETS"))
 
 # ---- 采集端白名单：一个微信号一把钥匙 ----
-# 独立文件 config\wx_clients.json，由厂商签发工具写入，服务端只读不写。
+# 独立文件 config\wx_clients.json。现在两个来源都可以写：
+#   1. 服务端「白名单」页新增 —— 密钥由服务端生成，配 IP 白名单和到期时间
+#   2. 厂商签发工具（客户就是厂商自己时）
 # X-Wx-Cust 里放的是微信号（客户端自己声明，可伪造，但伪造只会让服务端换把
 # 钥匙去算 HMAC，不知道密钥照样过不了，所以它只当索引用，不当凭证）。
 #
 # 放行规则（顺序判断）：
-#   1. 名单里有这个微信号且 enabled      → 用它的 secret 验签
-#   2. 名单里有这个微信号但已停用          → 拒（返回空密钥）
-#   3. 名单里没有，但名单里有别的在用条目  → 拒（严格模式，不回退全局）
-#   4. 名单整个为空                      → 回退 WX_PUSH_SECRET /
-#                                          wx_account_secrets（初始部署兼容）
+#   1. 名单里有这个微信号且 enabled、未过期、来源 IP 在白名单内 → 用它的 secret 验签
+#   2. 名单里有这个微信号但已停用 / 已过期 / IP 不符        → 拒（返回空密钥）
+#   3. 名单里没有，但名单里有别的在用条目                  → 拒（严格模式，不回退全局）
+#   4. 名单整个为空                                      → 回退 WX_PUSH_SECRET /
+#                                                          wx_account_secrets（初始部署兼容）
 CLIENTS_PATH = Path(CONFIG_PATH).parent / "wx_clients.json"
 
 _WL_LOCK = threading.Lock()
@@ -1946,7 +1949,51 @@ def recalc_account(account=None) -> dict:
 
 # ======================== 验签 ========================
 
-def secret_for(wechat: str) -> str:
+# ---- 白名单条目的两个可选把关：有效期、来源 IP ----
+# 这两个检查都在服务端做，客户把客户端本地校验拆了也没用。
+EXPIRE_GRACE_DAYS = 3          # 容忍客户机时间不准，到期后再多给 3 天
+
+
+def _allow_ip_list(text) -> List[str]:
+    """IP 白名单是手填的，逗号 / 分号 / 空格 / 换行都当分隔符。"""
+    return [p for p in re.split(r"[,;\s]+", str(text or "").strip()) if p]
+
+
+def ip_allowed(it: Dict[str, object], ip: str) -> bool:
+    """条目没填 ip_allow = 全放行；填了就只认列出来的 IP 或 CIDR。"""
+    allow = _allow_ip_list(it.get("ip_allow"))
+    if not allow:
+        return True
+    try:
+        addr = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return False               # 拿不到来源 IP（或格式不对）一律不能放进白名单之外
+    for item in allow:
+        try:
+            if "/" in item:
+                if addr in ipaddress.ip_network(item, strict=False):
+                    return True
+            elif addr == ipaddress.ip_address(item):
+                return True
+        except ValueError:
+            continue               # 某一条写错了不影响其它条目，别整条白名单失效
+    return False
+
+
+def client_expired(it: Dict[str, object], now=None) -> bool:
+    """expire_at 为空 = 不限期（老条目兼容）；到期后不接受任何推送。"""
+    exp = str(it.get("expire_at") or "").strip()
+    if not exp:
+        return False
+    try:
+        d = datetime.strptime(exp[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    today = (now or datetime.now()).date()
+    return today > d + timedelta(days=EXPIRE_GRACE_DAYS)
+
+
+def secret_for(wechat: str, ip: str = "") -> str:
     """按微信号取该采集端的密钥。空字符串 = 拒绝。
 
     白名单是唯一可信来源；名单为空时才回退旧的全局配置，保证
@@ -1958,6 +2005,10 @@ def secret_for(wechat: str) -> str:
     if it:
         if not bool(it.get("enabled", True)):
             return ""                       # 已停用：立刻失效
+        if client_expired(it):
+            return ""                       # 到期：客户端改本地日期也没用
+        if not ip_allowed(it, ip):
+            return ""                       # 来源 IP 不在名单里
         return str(it.get("secret") or "")
     if int(wl["enabled"]):
         return ""                           # 严格模式：不在名单 → 拒
@@ -1966,11 +2017,20 @@ def secret_for(wechat: str) -> str:
 
 
 def _client_ip() -> str:
-    xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return xff or (request.remote_addr or "?")
+    """来源 IP。默认只认 TCP 对端地址。
+
+    以前优先看 X-Forwarded-For，可这个头任何人都能自己写 —— 一旦用它
+    判 IP 白名单，等于给了别人一把"填个 127.0.0.1 就进来"的钥匙。
+    只有确实挂了反代（且反代自己会覆盖这个头）时才靠它，用环境变量显式开。
+    """
+    if (os.environ.get("MSB_TRUST_XFF") or "").strip().lower() in ("1", "true", "yes"):
+        xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if xff:
+            return xff
+    return request.remote_addr or "?"
 
 
-def _reject_reason(wechat: str) -> str:
+def _reject_reason(wechat: str, ip: str = "") -> str:
     """把「为什么拒」说清楚，方便排查是不是白名单没配上。"""
     wl = load_clients()
     wid = (wechat or "").strip()
@@ -1982,19 +2042,26 @@ def _reject_reason(wechat: str) -> str:
                 if int(wl["enabled"]) else "白名单为空且没配全局密钥")
     if not bool(it.get("enabled", True)):
         return "该微信号在白名单里已被停用"
+    if client_expired(it):
+        return "该客户端的有效期已过（%s），服务端按 expire_at 判定" % (
+            it.get("expire_at") or "-")
+    if not ip_allowed(it, ip):
+        return "来源 IP %s 不在该客户端的 IP 白名单里（%s）" % (
+            ip or "?", it.get("ip_allow") or "")
     return "签名或时间戳不对"
 
 
 def _log_reject(kind: str, wechat: str, ts: str) -> None:
     # 别人知道 URL 来试探时，这条日志是唯一的痕迹
+    ip = _client_ip()
     logger.warning("拒绝%s：来源=%s 微信号=%s 原因=%s ts=%s"
-                   % (kind, _client_ip(), wechat or "(空)", _reject_reason(wechat), ts))
+                   % (kind, ip, wechat or "(空)", _reject_reason(wechat, ip), ts))
 
 
 def verify_signature(raw: bytes, ts: str, sig: str, wechat: str = "") -> bool:
     if WX_SKIP_VERIFY:
         return True
-    secret = secret_for(wechat)
+    secret = secret_for(wechat, _client_ip())
     if not secret or not ts or not sig:
         return False
     try:
@@ -2786,6 +2853,8 @@ def api_clients():
             "customer_id": str(it.get("customer_id") or ""),
             "customer": str(it.get("customer") or ""),
             "expire_at": str(it.get("expire_at") or ""),
+            "expired": client_expired(it),
+            "ip_allow": str(it.get("ip_allow") or ""),
             "enabled": bool(it.get("enabled", True)),
             "added_at": str(it.get("added_at") or ""),
             "note": str(it.get("note") or ""),

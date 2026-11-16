@@ -16,14 +16,17 @@
 锁拿不到）。所以路径、配置、读数据都在 msb_paths / msb_view 里各实现一份。
 """
 
+import ipaddress
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import tkinter as tk
@@ -1035,8 +1038,8 @@ class MainWindow:
                                   secret=True)
         self.v_port = self._row(g1, "端口", "port",
                                 "默认 8899。改完要停止再启动才生效；采集端的推送地址也要跟着改", 1)
-        tip = tk.Label(g1, text="接几个采集端、各自用哪把密钥，都在「白名单」页里管；"
-                                "签发授权时会自动写进去，不用在这里填。",
+        tip = tk.Label(g1, text="接几个采集端、各自用哪把密钥、到期时间、IP 限制，都在「白名单」页里管："
+                                "点「新增」会生成 API Key，填到采集端就能推。",
                        font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left")
         tip.pack(fill="x", padx=14, pady=(0, 10))
 
@@ -1449,16 +1452,17 @@ class MainWindow:
 
         body = tk.Frame(tab, bg=CLR_BG)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        cols = ("wid", "cust", "secret", "expire", "last", "state")
+        cols = ("wid", "cust", "secret", "expire", "ip", "last", "state")
         heads = {"wid": "微信号", "cust": "客户", "secret": "密钥",
-                 "expire": "有效期至", "last": "最后推送", "state": "状态"}
-        widths = {"wid": 150, "cust": 100, "secret": 150, "expire": 100,
-                  "last": 140, "state": 80}
+                 "expire": "有效期至", "ip": "IP 白名单", "last": "最后推送",
+                 "state": "状态"}
+        widths = {"wid": 150, "cust": 90, "secret": 140, "expire": 100,
+                  "ip": 130, "last": 140, "state": 80}
         self.tv_wl = ttk.Treeview(body, columns=cols, show="headings", height=12)
         for c in cols:
             self.tv_wl.heading(c, text=heads[c])
             self.tv_wl.column(c, width=widths[c],
-                              anchor="w" if c in ("wid", "cust", "secret", "last") else "center")
+                              anchor="w" if c in ("wid", "cust", "secret", "ip", "last") else "center")
         vsb = ttk.Scrollbar(body, orient="vertical", command=self.tv_wl.yview)
         self.tv_wl.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
@@ -1473,6 +1477,10 @@ class MainWindow:
             return tk.Button(foot, text=text, font=FONT_S, bg=bg, fg=fg,
                              relief="flat", bd=0, cursor="hand2", command=cmd)
 
+        mk("新增", self._white_add, "#eef7f1", CLR_GREEN
+           ).pack(side="left", padx=(0, 10))
+        mk("编辑", lambda: self._white_add(edit=True), "#eef0f3", "#374151"
+           ).pack(side="left", padx=(0, 6))
         mk("启用", lambda: self._white_set(True), "#eef7f1", CLR_GREEN
            ).pack(side="left", padx=(0, 6))
         mk("停用", lambda: self._white_set(False), "#fdf4f3", CLR_RED
@@ -1538,9 +1546,19 @@ class MainWindow:
             sec = str(x.get("secret") or "")
             masked = (sec[:6] + "…" + sec[-5:]) if len(sec) > 12 else "…"
             on = bool(x.get("enabled", True))
+            exp = str(x.get("expire_at") or "-")
+            # 过期了就标出来 —— 否则"为什么签不过"要查很久
+            exp_show = exp
+            if exp not in ("", "-"):
+                try:
+                    _d = datetime.strptime(exp[:10], "%Y-%m-%d").date()
+                    if _d < (datetime.now() - timedelta(days=3)).date():
+                        exp_show = exp + "（已过期）"
+                except Exception:
+                    pass
             iid = self.tv_wl.insert("", "end", values=(
                 x.get("wechat_id") or "", x.get("customer_id") or "-",
-                masked, x.get("expire_at") or "-",
+                masked, exp_show, str(x.get("ip_allow") or "全放行"),
                 last.get(x.get("wechat_id")) or "-",
                 "● 启用" if on else "○ 已停用",
             ), tags=("on" if on else "off",))
@@ -1562,11 +1580,11 @@ class MainWindow:
         self.lb_wl_sub.configure(
             text="白名单 %d 个 · 启用 %d 个 · 最后更新 %s" % (len(rows), en, upd))
         if en:
-            tip = "签发授权后这里自动出现；停用即刻生效，不用重启"
+            tip = "点「新增」生成 API Key；停用 / 改到期时间都即时生效，不用重启"
         elif rows:
             tip = "全部停用中，采集端现在推什么都收不到"
         else:
-            tip = "去厂商授权工具签发一次，就会自动写进来"
+            tip = "还没有客户端：点「新增」生成 API Key，填到采集端的「服务端 API Key」"
         self.lb_wl_tip.configure(text=tip)
 
     def _white_sel(self):
@@ -1608,6 +1626,160 @@ class MainWindow:
         if self._write_white(doc):
             self.refresh_white()
             self._toast("已删除 %s" % wid)
+
+    # ---- 新增 / 编辑客户端：密钥由服务端生成，带 IP 白名单和到期时间 ----
+    def _white_add(self, edit: bool = False):
+        """新增一个采集端，或改已有那条的到期时间 / IP 白名单。
+
+        密钥由服务端生成（「重新生成」换一把），客户把它填进采集端的
+        「服务端 API Key」就能推；续期只改日期，密钥不用换。
+        """
+        wid0, row = "", {}
+        if edit:
+            wid0 = self._white_sel()
+            if not wid0:
+                return
+            for x in (self._read_white().get("clients") or []):
+                if isinstance(x, dict) and str(x.get("wechat_id") or "") == str(wid0):
+                    row = dict(x)
+                    break
+            if not row:
+                self._toast("这条已经不在名单里了，刷新一下")
+                return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(("编辑客户端 %s" % wid0) if edit else "新增客户端")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        dlg.configure(bg=CLR_BG)
+        dlg.grab_set()
+
+        body = tk.Frame(dlg, bg=CLR_CARD, highlightbackground=CLR_LINE,
+                        highlightthickness=1)
+        body.pack(fill="both", expand=True, padx=14, pady=12)
+
+        def lab(r, text):
+            tk.Label(body, text=text, font=FONT_S, bg=CLR_CARD, fg="#374151",
+                     anchor="w").grid(row=r, column=0, sticky="w",
+                                      padx=(12, 8), pady=(10 if r == 0 else 6, 0))
+
+        def entry(r, var, **kw):
+            e = tk.Entry(body, textvariable=var, font=FONT_S, width=42,
+                         relief="groove", bd=1)
+            e.grid(row=r, column=1, sticky="w", pady=(10 if r == 0 else 6, 0),
+                   padx=(0, 12))
+            e.configure(**kw) if kw else None
+            return e
+
+        lab(0, "微信号")
+        v_wid = tk.StringVar(value=wid0)
+        e_wid = entry(0, v_wid)
+        if edit:
+            e_wid.configure(state="readonly")
+
+        lab(1, "客户编号")
+        v_cid = tk.StringVar(value=str(row.get("customer_id") or ""))
+        entry(1, v_cid)
+
+        lab(2, "有效期至")
+        default_exp = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
+        v_exp = tk.StringVar(value=str(row.get("expire_at") or default_exp))
+        entry(2, v_exp)
+        tk.Label(body, text="YYYY-MM-DD，留空 = 不限期。到期后服务端一律拒收，客户端改本地日期也没用",
+                 font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED, justify="left").grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 0))
+
+        lab(4, "IP 白名单")
+        txt_ip = tk.Text(body, font=FONT_S, width=42, height=3, relief="groove", bd=1)
+        txt_ip.grid(row=4, column=1, sticky="w", pady=(6, 0), padx=(0, 12))
+        txt_ip.insert("1.0", str(row.get("ip_allow") or ""))
+        tk.Label(body, text="每行/逗号分隔一个 IP 或网段（如 192.168.1.10、10.0.0.0/24）；留空 = 全放行",
+                 font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED, justify="left").grid(
+            row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 0))
+
+        lab(6, "API Key")
+        v_key = tk.StringVar(value=str(row.get("secret") or secrets.token_hex(32)))
+        kf = tk.Frame(body, bg=CLR_CARD)
+        kf.grid(row=6, column=1, sticky="w", pady=(6, 0), padx=(0, 12))
+        e_key = tk.Entry(kf, textvariable=v_key, font=FONT_S, width=34,
+                         relief="groove", bd=1)
+        e_key.pack(side="left")
+        tk.Button(kf, text="重新生成", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2",
+                  command=lambda: v_key.set(secrets.token_hex(32))
+                  ).pack(side="left", padx=(6, 0))
+        tk.Label(body, text="把这串复制到采集端的「服务端 API Key」；续期只改日期，不用重新生成",
+                 font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED, justify="left").grid(
+            row=7, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
+
+        def save():
+            wid = v_wid.get().strip()
+            if not wid:
+                messagebox.showwarning("保存", "微信号不能为空", parent=dlg)
+                return
+            exp = v_exp.get().strip()
+            if exp:
+                try:
+                    datetime.strptime(exp, "%Y-%m-%d")
+                except ValueError:
+                    messagebox.showwarning("保存", "有效期格式要写成 2027-11-16", parent=dlg)
+                    return
+            ips_raw = txt_ip.get("1.0", "end").strip()
+            parts = [p for p in ips_raw.replace(";", " ").replace(",", " ").split() if p]
+            for p in parts:
+                try:
+                    ipaddress.ip_network(p, strict=False)
+                except ValueError:
+                    messagebox.showwarning("保存", "IP 格式不对：%s" % p, parent=dlg)
+                    return
+            key = v_key.get().strip()
+            if len(key) < 16:
+                messagebox.showwarning("保存", "API Key 太短（至少 16 位）", parent=dlg)
+                return
+
+            doc = self._read_white()
+            clients = [x for x in (doc.get("clients") or []) if isinstance(x, dict)]
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            found = False
+            for x in clients:
+                if str(x.get("wechat_id") or "") == wid:
+                    x["secret"] = key
+                    x["customer_id"] = v_cid.get().strip()
+                    x["expire_at"] = exp
+                    x["ip_allow"] = ", ".join(parts)
+                    x.setdefault("added_at", now)
+                    found = True
+                    break
+            if not found:
+                clients.append({
+                    "wechat_id": wid, "secret": key,
+                    "customer_id": v_cid.get().strip(),
+                    "customer": "",
+                    "issued_at": datetime.now().strftime("%Y-%m-%d"),
+                    "expire_at": exp, "ip_allow": ", ".join(parts),
+                    "enabled": True, "added_at": now, "note": "服务端新增",
+                })
+            doc["clients"] = clients
+            doc["updated_at"] = now
+            if not self._write_white(doc):
+                return
+            try:                     # 密钥直接进剪贴板，客户去采集端粘一下就行
+                self.root.clipboard_clear()
+                self.root.clipboard_append(key)
+            except Exception:
+                pass
+            dlg.destroy()
+            self.refresh_white(keep=wid)
+            self._toast("已保存，API Key 已复制到剪贴板")
+
+        btns = tk.Frame(dlg, bg=CLR_BG)
+        btns.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Button(btns, text="保存", font=FONT_S, bg=CLR_GREEN, fg="#ffffff",
+                  relief="flat", bd=0, cursor="hand2", width=10,
+                  command=save).pack(side="right")
+        tk.Button(btns, text="取消", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", width=8,
+                  command=dlg.destroy).pack(side="right", padx=(0, 8))
 
     def _white_open(self):
         if not WHITELIST_PATH.exists():
