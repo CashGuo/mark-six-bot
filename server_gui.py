@@ -64,6 +64,21 @@ def window_title():
 WHITELIST_PATH = Path(_paths.CONFIG_PATH).parent / "wx_clients.json"
 
 
+def _whitelist_enabled_count() -> int:
+    """白名单里启用的条数。读不到 / 文件还没生成都返回 0（首次安装就是这个状态）。"""
+    try:
+        with open(WHITELIST_PATH, encoding="utf-8-sig") as f:
+            doc = json.load(f)
+    except Exception:
+        return 0
+    n = 0
+    for it in (doc.get("clients") or []):
+        if isinstance(it, dict) and str(it.get("wechat_id") or "").strip() \
+                and bool(it.get("enabled", True)):
+            n += 1
+    return n
+
+
 CLR_BG = "#f6f7f9"
 CLR_CARD = "#ffffff"
 CLR_LINE = "#dfe3e8"
@@ -1470,19 +1485,19 @@ class MainWindow:
 
         body = tk.Frame(tab, bg=CLR_BG)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        cols = ("wid", "cust", "secret", "expire", "ip", "last", "state", "copy")
-        heads = {"wid": "微信号", "cust": "客户", "secret": "密钥",
+        cols = ("wid", "secret", "expire", "ip", "last", "state", "copy")
+        heads = {"wid": "微信号", "secret": "密钥",
                  "expire": "有效期至", "ip": "IP 白名单", "last": "最后推送",
                  "state": "状态", "copy": "API Key"}
         # 列宽合计压到 850：125% 缩放的笔记本上窗口会窄一圈，再宽的话
         # 最右边那列「API Key」会被裁到框外，用户点它等于点空气。
-        widths = {"wid": 150, "cust": 90, "secret": 120, "expire": 100,
+        widths = {"wid": 170, "secret": 130, "expire": 100,
                   "ip": 110, "last": 120, "state": 80, "copy": 80}
         self.tv_wl = ttk.Treeview(body, columns=cols, show="headings", height=12)
         for c in cols:
             self.tv_wl.heading(c, text=heads[c])
             self.tv_wl.column(c, width=widths[c],
-                              anchor="w" if c in ("wid", "cust", "secret", "ip", "last") else "center")
+                              anchor="w" if c in ("wid", "secret", "ip", "last") else "center")
         vsb = ttk.Scrollbar(body, orient="vertical", command=self.tv_wl.yview)
         self.tv_wl.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
@@ -1584,7 +1599,7 @@ class MainWindow:
                     pass
             wid = str(x.get("wechat_id") or "")
             iid = self.tv_wl.insert("", "end", values=(
-                wid, x.get("customer_id") or "-",
+                wid,
                 masked, exp_show, str(x.get("ip_allow") or "全放行"),
                 last.get(x.get("wechat_id")) or "-",
                 "● 启用" if on else "○ 已停用",
@@ -1611,7 +1626,7 @@ class MainWindow:
                     fg="#b5651d")
             else:
                 self.lb_wl_mode.configure(
-                    text="还没有采集端：点「新增」生成 API Key，否则服务起不来", fg=CLR_RED)
+                    text="还没有采集端：点「新增」生成 API Key，否则采集端推不进来", fg=CLR_RED)
         upd = doc.get("updated_at") or "—"
         self.lb_wl_sub.configure(
             text="白名单 %d 个 · 启用 %d 个 · 最后更新 %s" % (len(rows), en, upd))
@@ -1651,14 +1666,14 @@ class MainWindow:
         """点最右那一列的「复制」= 把这一行的 API Key 放进剪贴板。
 
         表格里密钥是打码的，客户要的是明文；所以点一下直接进剪贴板，
-        不用先选中再去菜单里翻。第 8 列就是那一列。
+        不用先选中再去菜单里翻。最后一列（第 7 列）就是那一列。
         """
         try:
             col = self.tv_wl.identify_column(event.x)
             row = self.tv_wl.identify_row(event.y)
         except Exception:
             return
-        if not row or col != "#8":
+        if not row or col != "#7":
             return
         try:
             wid = str(self.tv_wl.item(row, "values")[0] or "")
@@ -1868,7 +1883,7 @@ class MainWindow:
 
     def _white_open(self):
         if not WHITELIST_PATH.exists():
-            self._toast("还没有白名单文件，签发一次授权就会生成")
+            self._toast("还没有白名单条目：点「新增」加一条，这个文件会自动生成")
             return
         os.startfile(str(WHITELIST_PATH))
 
@@ -2108,7 +2123,13 @@ class MainWindow:
         ok, why = health(port)
         if ok:
             self.lb_state.configure(text="● 运行中", fg=CLR_OK)
-            self._set_hint("服务端在 %d 端口等着采集端推送；关掉这个窗口不影响后台运行" % port)
+            # 首次安装：白名单还空着的时候，服务端是起来了但采集端推不进来。
+            # 光说"等着采集端推送"会让人以为一切就绪，这里必须把缺口点出来。
+            if not _whitelist_enabled_count():
+                self._set_hint("白名单还没有启用的客户端：采集端现在推会被拒（401），"
+                               "去「白名单」页新增一条 API Key", "#b8860b")
+            else:
+                self._set_hint("服务端在 %d 端口等着采集端推送；关掉这个窗口不影响后台运行" % port)
             self._paint_run(True)
         else:
             pid = running_pid()
@@ -2279,13 +2300,10 @@ class MainWindow:
         missing = []
         if not self.v_key.get().strip():
             missing.append("大模型 API Key")
-        # 每个采集端一把 API Key，名单里没有启用的条目就一个号都收不进来。
-        # 界面上已经不给填「推送密钥」了，但老配置里那把服务端还认，
-        # 所以这里兼容一下：有它就还能按兜底模式起，只是提示去白名单页补。
-        wl_ok = self._white_enabled_count() > 0
-        if not wl_ok and not str(read_cfg().get("wx_push_secret") or "").strip():
-            missing.append("白名单里还没有启用的采集端"
-                           "（去「白名单」页点「新增」，会生成 API Key）")
+        # 白名单为空**不算**"起不来"的缺项：首次安装的顺序本来就是
+        # 先起服务端（好看界面、记账、配置），再去「白名单」加 Key。
+        # 拦在这里客户连界面都进不去，还以为是装坏了。启动后状态栏会一直
+        # 挂着一句"白名单为空，采集端推不进来"（见 _refresh_status）。
         if missing:
             messagebox.showerror("配置还没填",
                                  "缺这些必填项，服务起不来：\n\n  · " + "\n  · ".join(missing) +

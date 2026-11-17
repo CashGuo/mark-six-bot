@@ -228,17 +228,18 @@ def config_problems() -> List[str]:
 
     这些以前是模块级的 raise ValueError —— 打包成 EXE 后表现为双击闪退、
     连一行提示都看不到，所以改成返回清单，由调用方弹框。
+
+    白名单为空**不再拦启动**：首次安装是先起服务端、再去白名单加 Key 的，
+    拦在这里等于客户连界面都进不去，还得猜该先干哪一步。名单空只是"暂时
+    没人能推"，服务端自己的看板、手工记账、配置页都照常可用 ——
+    启动后在状态栏/日志里提醒一句就够了（见 main() 与 server_gui 的状态提示）。
     """
     out: List[str] = []
     if not LLM_API_KEY:
-        out.append("没填大模型 API Key（LLM_API_KEY / llm_api_key）")
+        out.append("没填大模型 API Key —— 去控制台「配置」页的「大模型」那一行填")
     wl = load_clients()
     if wl["error"]:
         out.append("白名单文件读不出来（%s），请检查：%s" % (wl["error"], CLIENTS_PATH))
-    if not WX_SKIP_VERIFY and int(wl["enabled"]) == 0 \
-            and not WX_PUSH_SECRET and not ACCOUNT_SECRETS:
-        out.append("还没有任何可用的采集端密钥：去「白名单」页确认已导入，"
-                   "或先在配置页填一个推送密钥")
     return out
 
 
@@ -2300,7 +2301,8 @@ def _reject_reason(wechat: str, ip: str = "") -> str:
     if not ip_allowed(it, ip):
         return "来源 IP %s 不在该客户端的 IP 白名单里（%s）" % (
             ip or "?", it.get("ip_allow") or "")
-    return "签名或时间戳不对"
+    return ("密钥对不上：采集端「配置」页的「服务端 API Key」要与这一行的一致。"
+            "没填的话采集端会退回用授权码派生的密钥，服务端只认这里生成的 Key")
 
 
 def _log_reject(kind: str, wechat: str, ts: str) -> None:
@@ -2390,6 +2392,20 @@ def wx_hook():
     ts = request.headers.get("X-Wx-Timestamp", "")
     sig = request.headers.get("X-Wx-Signature", "")
     wechat = request.headers.get("X-Wx-Cust", "")
+
+    # 时间戳单独先判：新装的机器系统时间不准是 401 的头号原因，
+    # 笼统回一句「签名或时间戳不对」客户不知道自己是时间还是 key 的问题。
+    if ts and not WX_SKIP_VERIFY:
+        try:
+            skew = abs(time.time() - int(ts))
+        except Exception:
+            skew = None
+        if skew is not None and skew > WX_SKEW_SEC:
+            _log_reject("推送", wechat, ts)
+            return jsonify({"ok": False, "error": "unauthorized",
+                            "reason": "时间戳超窗：两边差了 %d 秒（超过 %d 秒就拒），"
+                                      "把采集端那台机器的时间同步一下再试"
+                                      % (int(skew), WX_SKEW_SEC)}), 401
 
     if not verify_signature(raw, ts, sig, wechat):
         ip = _client_ip()
@@ -3843,6 +3859,11 @@ def main():
         print(f"📅 当年生肖：{current_zodiac} ({', '.join(zodiac_mapping[current_zodiac])})")
         print(f"🔐 验签：{'跳过（调试）' if WX_SKIP_VERIFY else '开启'}"
               f"（密钥 {len(ACCOUNT_SECRETS) + (1 if WX_PUSH_SECRET else 0)} 把）")
+        if not WX_SKIP_VERIFY and int(load_clients()["enabled"]) == 0:
+            logger.warning("白名单还没有启用的客户端：采集端推上来会被拒（401），"
+                           "去「白名单」页新增一条 API Key")
+            print("⚠ 白名单为空：先起服务没问题，但采集端现在推不进来 —— "
+                  "去控制台「白名单」页新增一条 API Key")
         print(f"👤 当前账号：{CURRENT_ACCOUNT}（已接账号：{', '.join(all_accounts()) or '无'}）")
         print(f"📡 接收地址：http://{HOST}:{PORT}/wx/hook")
         print(f"🖥  网页看板：http://127.0.0.1:{PORT}/")
