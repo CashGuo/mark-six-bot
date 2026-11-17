@@ -2300,10 +2300,13 @@ class MainWindow:
         missing = []
         if not self.v_key.get().strip():
             missing.append("大模型 API Key")
-        # 白名单为空**不算**"起不来"的缺项：首次安装的顺序本来就是
-        # 先起服务端（好看界面、记账、配置），再去「白名单」加 Key。
-        # 拦在这里客户连界面都进不去，还以为是装坏了。启动后状态栏会一直
-        # 挂着一句"白名单为空，采集端推不进来"（见 _refresh_status）。
+        # 一条能推的客户端都没有 → 起了也收不到注，所以直接拦住，
+        # 把"去白名单新增"摆在面前（文案别指向早已删掉的「配置页推送密钥」）。
+        # 老配置里若还留着兜底密钥，就按兼容模式放行。
+        wl_ok = self._white_enabled_count() > 0
+        if not wl_ok and not str(read_cfg().get("wx_push_secret") or "").strip():
+            missing.append("白名单里还没有启用采集端 —— 去「白名单」页点「新增」生成一条"
+                           "（微信号填采集端顶部那个号，采集端那格右边可复制）")
         if missing:
             messagebox.showerror("配置还没填",
                                  "缺这些必填项，服务起不来：\n\n  · " + "\n  · ".join(missing) +

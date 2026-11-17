@@ -229,10 +229,8 @@ def config_problems() -> List[str]:
     这些以前是模块级的 raise ValueError —— 打包成 EXE 后表现为双击闪退、
     连一行提示都看不到，所以改成返回清单，由调用方弹框。
 
-    白名单为空**不再拦启动**：首次安装是先起服务端、再去白名单加 Key 的，
-    拦在这里等于客户连界面都进不去，还得猜该先干哪一步。名单空只是"暂时
-    没人能推"，服务端自己的看板、手工记账、配置页都照常可用 ——
-    启动后在状态栏/日志里提醒一句就够了（见 main() 与 server_gui 的状态提示）。
+    白名单为空照样拦启动：一条能推的客户端都没有，起了也收不到注，
+    早点把"去白名单新增"这件事摆到面前，比开着一个假装正常的服务强。
     """
     out: List[str] = []
     if not LLM_API_KEY:
@@ -240,6 +238,10 @@ def config_problems() -> List[str]:
     wl = load_clients()
     if wl["error"]:
         out.append("白名单文件读不出来（%s），请检查：%s" % (wl["error"], CLIENTS_PATH))
+    if not WX_SKIP_VERIFY and int(wl["enabled"]) == 0 \
+            and not WX_PUSH_SECRET and not ACCOUNT_SECRETS:
+        out.append("还没有可用的采集端 API Key —— 去控制台「白名单」页点「新增」生成一条"
+                   "（微信号那一栏填采集端顶部显示的号）")
     return out
 
 
@@ -3859,11 +3861,6 @@ def main():
         print(f"📅 当年生肖：{current_zodiac} ({', '.join(zodiac_mapping[current_zodiac])})")
         print(f"🔐 验签：{'跳过（调试）' if WX_SKIP_VERIFY else '开启'}"
               f"（密钥 {len(ACCOUNT_SECRETS) + (1 if WX_PUSH_SECRET else 0)} 把）")
-        if not WX_SKIP_VERIFY and int(load_clients()["enabled"]) == 0:
-            logger.warning("白名单还没有启用的客户端：采集端推上来会被拒（401），"
-                           "去「白名单」页新增一条 API Key")
-            print("⚠ 白名单为空：先起服务没问题，但采集端现在推不进来 —— "
-                  "去控制台「白名单」页新增一条 API Key")
         print(f"👤 当前账号：{CURRENT_ACCOUNT}（已接账号：{', '.join(all_accounts()) or '无'}）")
         print(f"📡 接收地址：http://{HOST}:{PORT}/wx/hook")
         print(f"🖥  网页看板：http://127.0.0.1:{PORT}/")
