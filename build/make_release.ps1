@@ -55,4 +55,4 @@ Get-ChildItem -LiteralPath $Rel -Recurse -File |
     ForEach-Object { Write-Output ("  {0,-46} {1,12:N0} 字节" -f $_.FullName.Replace($Rel + "\", ""), $_.Length) }
 $z = Get-Item -LiteralPath $zip
 Write-Output ("[release] zip：{0}  {1:N0} 字节" -f $zip, $z.Length)
-Write-Output "[release] 客户侧：双击 MarkSixBot.exe 即可；配置在 %LOCALAPPDATA%\MarkSixBot\config\server.json（首启自动生成），推送密钥与大模型 Key 在「配置」页填"
+Write-Output "[release] 客户侧：双击 MarkSixBot.exe 即可；配置在 %LOCALAPPDATA%\MarkSixBot\config\server.json（首启自动生成），大模型 Key 在「配置」页填，采集端 Key 在「白名单」页新增"
