@@ -118,13 +118,40 @@ def count_today(path) -> int:
 # ---------------- 账号 ----------------
 
 def all_accounts() -> list:
-    """已真正接入的账号：有账本，或上报过会话清单（targets 空壳不算）。"""
+    """能记账的账号：有账本、上报过会话清单，**或白名单里启用的微信号**。
+
+    白名单这一支是给「首次安装」兜底的：刚装好时账本目录和清单都还是空的，
+    客户先在白名单加了 API Key（那里必填微信号），要是账号下拉里没有这个号，
+    手工记账 / 文本记账一笔都记不进去 —— 下拉是空的，选不了账号。
+    白名单里的微信号就是采集端推送时用的那个号，账本落进去以后跟推送对得上。
+    """
     out = set()
     for p in state_dir().glob("*/numbers_state.json"):
         out.add(p.parent.name)
     for p in contacts_dir().glob("*.json"):
         out.add(p.stem)
+    out |= whitelist_accounts()
     return sorted(out)
+
+
+def whitelist_accounts() -> set:
+    """白名单里启用的微信号（config\\wx_clients.json）。读不出来就当没有。"""
+    try:
+        path = Path(_paths.CONFIG_PATH).parent / "wx_clients.json"
+        with open(path, encoding="utf-8-sig") as f:
+            doc = json.load(f)
+    except Exception:
+        return set()
+    out = set()
+    for it in (doc.get("clients") or []):
+        if not isinstance(it, dict):
+            continue
+        if not bool(it.get("enabled", True)):
+            continue
+        wid = str(it.get("wechat_id") or "").strip()
+        if wid:
+            out.add(wid)
+    return out
 
 
 # ---------------- 生肖与号码 ----------------

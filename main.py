@@ -335,6 +335,16 @@ def all_accounts() -> List[str]:
             out.add(p.parent.name)
     for p in CONTACTS_DIR.glob("*.json"):
         out.add(p.stem)
+    # 白名单里启用的微信号也列进来：首次安装时账本和会话清单都还是空的，
+    # 客户先在白名单加了 API Key（微信号必填），账号下拉必须能选到它，
+    # 否则手工记账 / 文本记账一笔都落不进去。它和采集端推送用的 account
+    # 是同一个号，账本落进 state\<微信号>，以后推送来了就对得上。
+    try:
+        for wid, it in (load_clients()["map"] or {}).items():
+            if bool(it.get("enabled", True)) and str(wid or "").strip():
+                out.add(str(wid).strip())
+    except Exception:
+        pass                    # 白名单文件坏了就当没有，别把接口打挂
     return sorted(out)
 
 
