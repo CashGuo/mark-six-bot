@@ -22,15 +22,11 @@ New-Item -ItemType Directory -Force -Path $Rel | Out-Null
 # 换版本只换 EXE，客户目录不动。
 Copy-Item -LiteralPath $Exe -Destination (Join-Path $Rel "MarkSixBot.exe") -Force
 Copy-Item -LiteralPath (Join-Path $Tpl "从这里开始.txt") -Destination (Join-Path $Rel "从这里开始.txt") -Force
-# 出厂 config 一起带上：客户机器上还没有 server.json 时，adopt_config 会把它抄到
-# 用户目录，这样默认模型名等重要项以包里的为准，而不是编译时固化在 EXE 里的旧值。
-$TplCfg = Join-Path $Tpl "config"
-if (Test-Path -LiteralPath $TplCfg) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $Rel "config") | Out-Null
-    Get-ChildItem -LiteralPath $TplCfg -File | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Rel ("config\" + $_.Name)) -Force
-    }
-}
+# 交付包里不放 config：配置只认用户目录 %LOCALAPPDATA%\MarkSixBot\config\server.json。
+# 客户机器上还没有 server.json 时，第一次启动由 msb_paths.adopt_config() 写一份出厂默认
+# （_DEFAULT_CONFIG，编译进 EXE）。以前这里塞一份 config\server.json 当"种子"，
+# 结果 EXE 同目录也躺着个配置文件，容易被当成"改这里就生效"，还漏过 draw_time 这类新项。
+# 出厂默认要改，改 msb_paths._DEFAULT_CONFIG 后重新编译，不要往包里塞文件。
 
 # 自检：交付包里绝不能出现大模型 Key。
 # 推送密钥（wx_push_secret）是有意内置的出厂默认值 —— 它必须和采集端配对，
@@ -59,4 +55,4 @@ Get-ChildItem -LiteralPath $Rel -Recurse -File |
     ForEach-Object { Write-Output ("  {0,-46} {1,12:N0} 字节" -f $_.FullName.Replace($Rel + "\", ""), $_.Length) }
 $z = Get-Item -LiteralPath $zip
 Write-Output ("[release] zip：{0}  {1:N0} 字节" -f $zip, $z.Length)
-Write-Output "[release] 客户侧：双击 MarkSixBot.exe 就能用（推送密钥已内置）；要用大模型兜底再填自己的 API Key"
+Write-Output "[release] 客户侧：双击 MarkSixBot.exe 即可；配置在 %LOCALAPPDATA%\MarkSixBot\config\server.json（首启自动生成），推送密钥与大模型 Key 在「配置」页填"
