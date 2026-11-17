@@ -2279,7 +2279,8 @@ def _reject_reason(wechat: str, ip: str = "") -> str:
         return "没带 X-Wx-Cust（微信号没传上来：采集端的授权码还没粘好或没生效，服务端靠它查白名单）"
     it = (wl["map"] or {}).get(wid)
     if not it:
-        return ("不在白名单（当前严格模式，只收名单内的）"
+        return ("不在白名单（严格模式只收名单内的。核对这个微信号与服务端白名单里填的是否一模一样 —— "
+                "采集端顶部「微信账号」那格右边有复制按钮）"
                 if int(wl["enabled"]) else "白名单为空且没配全局密钥")
     if not bool(it.get("enabled", True)):
         return "该微信号在白名单里已被停用"

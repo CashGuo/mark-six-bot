@@ -1760,7 +1760,9 @@ class MainWindow:
         e_wid = entry(0, v_wid)
         if edit:
             e_wid.configure(state="readonly")
-        tk.Label(body, text="填这台采集端登录的微信号 —— 只用来分辨是谁在推，不参与验签，写错不影响推送",
+        tk.Label(body, text="必须与采集端顶部「微信账号」里的那个号一模一样（采集端那格右边有「复制」按钮，\n"
+                            "复制过来粘贴即可）。服务端就是靠它去白名单查这一行、再拿这行的 API Key 验签 ——\n"
+                            "填错 = 采集端每次推送都回 401。",
                  font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED, justify="left",
                  wraplength=400).grid(
             row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 0))
