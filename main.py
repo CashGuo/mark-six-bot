@@ -2276,7 +2276,7 @@ def _reject_reason(wechat: str, ip: str = "") -> str:
     wl = load_clients()
     wid = (wechat or "").strip()
     if not wid:
-        return "没带 X-Wx-Cust（采集端版本过旧？）"
+        return "没带 X-Wx-Cust（微信号没传上来：采集端的授权码还没粘好或没生效，服务端靠它查白名单）"
     it = (wl["map"] or {}).get(wid)
     if not it:
         return ("不在白名单（当前严格模式，只收名单内的）"
@@ -2349,6 +2349,9 @@ def verify_get_signature(ts: str, sig: str, path: str, method: str = "GET",
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 app = Flask(__name__, template_folder=str(_TEMPLATE_DIR))
+# 中文原样输出，不转成 \uXXXX。采集端把回执当纯文本打印给客户看
+# （比如 401 的 reason），转义了就成了天书；浏览器那边 JSON 一样能解析。
+app.json.ensure_ascii = False
 
 TEXT_TYPES = {"文本"}
 SKIP_TYPES = {"系统消息"}
@@ -2378,8 +2381,13 @@ def wx_hook():
     wechat = request.headers.get("X-Wx-Cust", "")
 
     if not verify_signature(raw, ts, sig, wechat):
+        ip = _client_ip()
+        reason = _reject_reason(wechat, ip)
         _log_reject("推送", wechat, ts)
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+        # 把原因带回采集端：客户装完第一件事就是点「测试地址」，
+        # 只回一个 401 他没法知道是号不对、过期了、还是 IP 没放行，
+        # 只能跑来问。原因里不含密钥，也不含别人的条目，说清楚更省事。
+        return jsonify({"ok": False, "error": "unauthorized", "reason": reason}), 401
     _LAST_PUSH[(wechat or "").strip()] = time.time()
 
     try:
