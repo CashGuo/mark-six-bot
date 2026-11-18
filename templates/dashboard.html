@@ -350,7 +350,10 @@ function renderTop(){
   document.getElementById('issue').textContent = d.issue || '—';
   document.getElementById('zyear').textContent =
     (d.zodiac_year || '—') + '年' + (d.zodiac ? ' · ' + d.zodiac : '');
-  document.getElementById('desk').textContent = fmt(d.grand_total);
+  // 「号码盘」只算逐号注（澳 + 港两本盘面之和），平特/连肖/组合注单独一个「平特」。
+  // 以前这里跟总金额一样取 grand_total，等于把平特的钱又算进号码盘，两个数永远相等。
+  const deskTot = (((d.markets || {}).ALL || {}).board) || 0;
+  document.getElementById('desk').textContent = fmt(deskTot);
   document.getElementById('flat').textContent = fmt(d.flat_total);
   document.getElementById('krec').textContent = d.records_current || 0;
   document.getElementById('kunp').textContent = unparsedCount();

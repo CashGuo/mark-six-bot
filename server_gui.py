@@ -1980,8 +1980,11 @@ class MainWindow:
         self.lb_issue.configure(text="%s 期" % s.get("issue", "—"))
         self.lb_zyear.configure(text="%s年 · %s" % (s["zodiac_year"], s["zodiac"]))
         self.lb_kbets.configure(text=str(s.get("numbers_with_bets_all", s["numbers_with_bets"])))
-        # 顶栏只剩一个「号码盘 = 澳 + 港」，两本各自的金额在盘面右下角
-        self.lb_desk.configure(text=fmt_money(s.get("grand_total") or 0))
+        # 顶栏只剩一个「号码盘 = 澳 + 港」，两本各自的金额在盘面右下角。
+        # 取 markets.ALL.board（纯逐号注），不能用 grand_total —— 那是号码盘 + 平特，
+        # 会让「号码盘」和「平特」两个数字重复计一遍平特的钱。
+        self.lb_desk.configure(text=fmt_money(
+            ((banks.get("ALL") or {}).get("board")) or 0))
         self.lb_flat.configure(text=fmt_money(s.get("flat_total") or 0))
         self.lb_krec.configure(text=str(s.get("records_current") or 0))
         cur_issue = str(s.get("issue") or "")
