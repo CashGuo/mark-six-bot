@@ -614,7 +614,8 @@ def _take_unit(s: str, sx_chars: str) -> Tuple[Optional[float], str]:
     if got:
         return got
 
-    return 10.0, s
+    # 抽不到单价：不再默认 10 —— 客户拍板「香47 这种只写号码不写金额的不记账」
+    return None, s
 
 
 # ======================== 切项 ========================
@@ -783,6 +784,20 @@ def _take_numbers(s: str) -> Tuple[Set[str], str]:
     return nums, " ".join(left)
 
 
+def _no_amount(seg: str) -> bool:
+    """这一段一个像金额的数字都没有：没有「各/买/…+数字」，也没有 >49 的数。
+
+    用来把「只写号码不写金额」（香47 / 47 49）判死 —— 客户拍板这种不记账，
+    也不能送模型，否则模型会自己补一个金额出来。
+    """
+    if _HAS_PRICE.search(seg):
+        return False
+    for n in re.findall(r"\d+(?:\.\d+)?", seg):
+        if float(n) > 49:
+            return False
+    return True
+
+
 def parse_item(raw: str, zodiac: Dict[str, List[str]], sx_chars: str) -> Optional[dict]:
     """解析一项。返回 {nums, unit, desc}；吃不下返回 None。"""
     s = (raw or "").strip()
@@ -806,6 +821,11 @@ def parse_item(raw: str, zodiac: Dict[str, List[str]], sx_chars: str) -> Optiona
         if m_tail:
             unit = float(m_tail.group(1))
             rest = ""
+
+    # 整项都没有金额（"香47" / "47 49"）：不记账，整项交不出去。
+    # 客户拍板：只写号码不写金额的不记，免得按默认值乱入账。
+    if unit is None:
+        return None
 
     extra, leftover = _take_numbers(rest)
     if leftover.strip():
@@ -932,6 +952,11 @@ def parse_core(t: str, zodiac: Dict[str, List[str]], market: str) -> dict:
                         "bets": {}, "items": [], "detail": "", "market": market}
         got = parse_item(seg, zodiac, sx_chars)
         if got is None:
+            # 只写号码不写金额（"香47" / "47 49"）：客户拍板不记账，判死且不送模型
+            if _no_amount(seg):
+                return {"ok": False, "fatal": True,
+                        "reason": "没写金额，不记账（请补金额，如「47各100」「平特鼠100」）",
+                        "bets": {}, "items": [], "detail": "", "market": market}
             return {"ok": False, "reason": "规则解析不了：%s" % seg,
                     "bets": {}, "items": [], "detail": "", "market": market}
 
