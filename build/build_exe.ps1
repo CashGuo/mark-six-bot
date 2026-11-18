@@ -1,5 +1,7 @@
 ﻿param(
-    [switch]$SkipClean
+    [switch]$SkipClean,
+    # 产物文件名里的日期戳。默认当天，如 MarkSixBot-20261118.exe
+    [string]$Stamp = (Get-Date -Format "yyyyMMdd")
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,7 +32,7 @@ $nuitkaArgs = @(
     "--windows-console-mode=disable",
     "--assume-yes-for-downloads",
     "--output-dir=$Out",
-    "--output-filename=MarkSixBot.exe",
+    "--output-filename=MarkSixBot-$Stamp.exe",
     "--include-data-dir=$Root\templates=templates",
     "--enable-plugin=tk-inter",
     # openai SDK 里有靠 try/import 和间接引用才加载的子模块，静态分析会漏掉
@@ -45,6 +47,9 @@ $nuitkaArgs = @(
     # 多线程压 121MB 的 dist，实测直接 "Allocation error : not enough memory"
     # 打包失败。--low-memory 会把压缩级别降到 3、单线程，包大一点但一定能出。
     "--low-memory",
+    # 编译阶段默认只起一个 cl.exe，14 核机器上 CPU 只占 1%，2461 个编译单元要跑 7 小时。
+    # 这里显式给并发；内存 15.7G 编译期够用（吃内存的是最后的 onefile 压缩，不是编译）。
+    "--jobs=$env:NUMBER_OF_PROCESSORS",
     "--company-name=MarkSixBot",
     "--product-name=MarkSixBot server",
     "--file-version=1.0.0.0",
@@ -61,7 +66,7 @@ try {
     Pop-Location
 }
 
-$exe = Join-Path $Out "MarkSixBot.exe"
+$exe = Join-Path $Out "MarkSixBot-$Stamp.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "没生成 $exe" }
 
 # 配置不再随包放：服务端第一次启动会在 %LOCALAPPDATA%\MarkSixBot\config\

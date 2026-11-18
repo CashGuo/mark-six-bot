@@ -1,11 +1,13 @@
 ﻿param(
-    [string]$Version = "1.0.0",
-    [switch]$SkipBuild
+    [string]$Version = (Get-Date -Format "yyyyMMdd"),
+    [switch]$SkipBuild,
+    # 指定要打包的 EXE 文件名（只写文件名，不带路径）。不传就取 build\out 里最新那个。
+    [string]$ExeName = ""
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$Exe  = Join-Path $Root "build\out\MarkSixBot.exe"
+$Out  = Join-Path $Root "build\out"
 $Rel  = Join-Path $Root "build\release\MarkSixBot-Server"
 $Tpl  = Join-Path $Root "build\release_template"
 
@@ -13,15 +15,33 @@ if (-not $SkipBuild) {
     & (Join-Path $Root "build\build_exe.ps1")
     if ($LASTEXITCODE -ne 0) { throw "编译失败，退出码 $LASTEXITCODE" }
 }
-if (-not (Test-Path -LiteralPath $Exe)) { throw "没有 $Exe（先跑 build\build_exe.ps1" }
+
+# 编译产物现在带日期戳（MarkSixBot-20261118.exe），不再写死 MarkSixBot.exe。
+# 没指定就取 out 里最新的一个，这样多版本并存也不会拿错。
+if ($ExeName) {
+    $Exe = Join-Path $Out $ExeName
+} else {
+    $cand = Get-ChildItem -LiteralPath $Out -Filter "MarkSixBot*.exe" -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending
+    if (-not $cand) { throw "build\out 里没有 MarkSixBot*.exe（先跑 build\build_exe.ps1）" }
+    $Exe = $cand[0].FullName
+}
+if (-not (Test-Path -LiteralPath $Exe)) { throw "没有 $Exe（先跑 build\build_exe.ps1）" }
+$ExeLeaf = Split-Path -Leaf $Exe
+Write-Output "[release] 用这个 EXE：$ExeLeaf"
 
 if (Test-Path -LiteralPath $Rel) { Remove-Item -LiteralPath $Rel -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $Rel | Out-Null
 
 # 交付就一个 EXE 加一份说明。配置、账本、日志都在 %LOCALAPPDATA%\MarkSixBot\，
 # 换版本只换 EXE，客户目录不动。
-Copy-Item -LiteralPath $Exe -Destination (Join-Path $Rel "MarkSixBot.exe") -Force
+Copy-Item -LiteralPath $Exe -Destination (Join-Path $Rel $ExeLeaf) -Force
 Copy-Item -LiteralPath (Join-Path $Tpl "从这里开始.txt") -Destination (Join-Path $Rel "从这里开始.txt") -Force
+
+# 说明文本里原本统一写 MarkSixBot.exe，现在产物带日期，把实际名字替换进去
+$readme = Join-Path $Rel "从这里开始.txt"
+$txt = [IO.File]::ReadAllText($readme)
+[IO.File]::WriteAllText($readme, $txt.Replace("MarkSixBot.exe", $ExeLeaf), [Text.Encoding]::UTF8)
 # 交付包里不放 config：配置只认用户目录 %LOCALAPPDATA%\MarkSixBot\config\server.json。
 # 客户机器上还没有 server.json 时，第一次启动由 msb_paths.adopt_config() 写一份出厂默认
 # （_DEFAULT_CONFIG，编译进 EXE）。以前这里塞一份 config\server.json 当"种子"，
@@ -55,4 +75,4 @@ Get-ChildItem -LiteralPath $Rel -Recurse -File |
     ForEach-Object { Write-Output ("  {0,-46} {1,12:N0} 字节" -f $_.FullName.Replace($Rel + "\", ""), $_.Length) }
 $z = Get-Item -LiteralPath $zip
 Write-Output ("[release] zip：{0}  {1:N0} 字节" -f $zip, $z.Length)
-Write-Output "[release] 客户侧：双击 MarkSixBot.exe 即可；配置在 %LOCALAPPDATA%\MarkSixBot\config\server.json（首启自动生成），大模型 Key 在「配置」页填，采集端 Key 在「白名单」页新增"
+Write-Output "[release] 客户侧：双击 $ExeLeaf 即可；配置在 %LOCALAPPDATA%\MarkSixBot\config\server.json（首启自动生成），大模型 Key 在「配置」页填，采集端 Key 在「白名单」页新增"
