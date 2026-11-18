@@ -145,16 +145,54 @@ HK_MARKS = ("香", "港", "巷")
 MO_MARKS = ("奥", "澳", "门")
 
 
+def _expand_num_range(m):
+    """「1-10各10 / 05至12各20 / 3~7各5」展开成逐个号码。
+
+    只展开像号码的范围（1~49 内、升序、跨度不超过 20），
+    别的连字符（日期、负数之类）原样留着，交给后面的规矩判。
+    """
+    a, b = int(m.group(1)), int(m.group(2))
+    if not (1 <= a <= 49 and 1 <= b <= 49) or b < a or b - a > 20:
+        return m.group(0)
+    return " ".join("%d" % i for i in range(a, b + 1))
+
+
+def _join_numbers(m):
+    """「30同31各100」的连接词：两边都是号码才当"和"。
+
+    "30跟100" 里 100 是钱（号码最大 49），那种「跟」是动词，原样留给单价词表。
+    """
+    nxt = int(m.group(2))
+    if nxt <= 49:
+        return "%s %s" % (m.group(1), m.group(2))
+    return m.group(0)
+
+
 def normalize(text: str) -> str:
     t = (text or "").strip()
     t = t.replace("\n", "").replace("\r", "")
     for wrong, right in TYPO.items():
         t = t.replace(wrong, right)
-    # "买鼠50 / 叫鼠50 / 下注鼠50"：格式词写在对象前面，纯噪声，直接去掉
-    for w in ("下注", "买", "叫"):
-        t = t.replace(w, "")
+    # "买鼠50 / 叫鼠50 / 下注鼠50"：格式词写在对象前面，纯噪声，直接去掉。
+    # 只剥**项首**的：客户也写 "30买100"、"31打200"，那里的是动词。
+    # 一律删掉会把号码和金额黏成 "30100"，整条就废了（线上真实报过这个）。
+    t = re.sub(r"(?:^|(?<=[\s,，、;；/|]))(?:下注|买|叫)(?=[\u4e00-\u9fff])", "", t)
     for a, b in _PUNCT.items():
         t = t.replace(a, b)
+    # 「30 买 100 / 49 各 250」：号码和动词之间夹了空格，会被切成两段，
+    # 这里先紧缩成 "30买100"，不然「买100」那段没有号码，整条就判废
+    t = re.sub(r"(\d)\s*(各号|各码|各数|每个号|每个数|一个号|一个数|每码"
+               r"|各|个|号|买|打|要|投|押|跟|落|记|报|叫|约)\s*(\d)",
+               r"\1\2\3", t)
+    # 「30同31各100 / 30和31各100 / 30加31各100」：连接词当"和"讲
+    t = re.sub(r"(\d{1,2})\s*(?:同埋|同|和|跟|及|与|加)\s*(\d{1,2})(?!\d)",
+               _join_numbers, t)
+    # 「1-10各10 / 1至10各10」：号码范围展开成逐个号
+    t = re.sub(r"(\d{1,2})\s*[-~至到]\s*(\d{1,2})(?!\d)", _expand_num_range, t)
+    # 「30买100.31买50」：手机输入用点号续写下一注。
+    # 只认"两位数以上的金额 + 点 + 号码 + 动词"，免得把 3.5 这类小数拆了
+    t = re.sub(r"(\d{2,})\s*\.\s*(?=\d{1,2}\s*(?:各|个|号|买|打|要|投|押|跟|落|记|报|同))",
+               r"\1 ", t)
     # 复合玩法被空格拆开（"小 单 50" → "小单 50"，"红 波 100" → "红波 100"）：
     # 拆开会被当成两种独立玩法取并集，17 个号会变成 37 个号，必须合回去。
     t = re.sub(r"(红|蓝|绿)\s*(单|双|小|大|波)", r"\1\2", t)
@@ -465,10 +503,16 @@ def _zodiac_plays(zodiac: Dict[str, List[str]]) -> List[Play]:
 
 # ======================== 单价 ========================
 
-# 文档里的格式词全收：各/各号/各码/各数/个/买/叫/约/每个号/每码/一个号/=
+# 单注格式词。文档里的是 各/各号/各码/各数/个/每码/每个号/一个号/=；
+# 客户实际还这么写（都是"号码 + 动词 + 金额"）：
+#   30买100  31打200  32要50  33投30  34押100  35跟50  36落20  37记100  38报30
+#   39号100  40×100   41@100  42*100
+# 注意别把「中」加进来：组合注是"二中二100"，那个中要先给 _ZHONG_WORDS 认。
+_AMOUNT_WORDS = (r"(?:各号|各码|各数|每个号|每个数|一个号|一个数|每码|各|个|号"
+                 r"|买|打|要|投|押|跟|落|记|报|同|叫|约|=|≈|×|@|\*)")
+
 _PRICE = re.compile(
-    r"(?:各号|各码|各数|每个号|每个数|一个号|一个数|每码|各|个|买|叫|约|=|≈)"
-    r"\s*([0-9零一二两三四五六七八九十百千万]+)\s*(?:元|块)?"
+    _AMOUNT_WORDS + r"\s*([0-9零一二两三四五六七八九十百千万]+)\s*(?:元|块)?"
 )
 
 
@@ -565,10 +609,9 @@ def _take_unit(s: str, sx_chars: str) -> Tuple[Optional[float], str]:
 
 # ======================== 切项 ========================
 
-# 单价标记：判断"这一段是不是一个完整的注"
+# 单价标记：判断"这一段是不是一个完整的注"（词表与 _PRICE 保持一致）
 _HAS_PRICE = re.compile(
-    r"(?:各号|各码|各数|每个号|每个数|一个号|一个数|每码|各|个|买|叫|约|=|≈)"
-    r"\s*[0-9零一二两三四五六七八九十百千万]+\s*(?:元|块)?"
+    _AMOUNT_WORDS + r"\s*[0-9零一二两三四五六七八九十百千万]+\s*(?:元|块)?"
 )
 
 
@@ -607,6 +650,18 @@ def _is_subject_head(seg: str, sx_chars: str) -> bool:
     return s[0] in sx_chars or s[0] in _PLAY_TAIL_CHARS
 
 
+def _subject_money(seg: str, sx_chars: str) -> bool:
+    """整段是「对象 + 金额」，且那个数 > 49 —— 只能是钱，不可能是号码。
+
+    用来断开 "鼠50 30买100" 这种生肖注后面接着号码注的写法。
+    "虎5 17各20" 的 5 还可能是号码（最大 49），不能据此切，要留给同一笔扫。
+    """
+    if not _subject_amount(seg, sx_chars):
+        return False
+    m = re.search(r"([0-9]+)\s*$", seg or "")
+    return bool(m and int(m.group(1)) > 49)
+
+
 def split_items(text: str, sx_chars: str) -> List[str]:
     """把一条消息切成若干个独立的注。
 
@@ -640,13 +695,20 @@ def split_items(text: str, sx_chars: str) -> List[str]:
             out.append(buf)
             buf = seg
             continue
+        # "鼠50 30买100"：生肖那笔的 50 已经是钱（>49），后面起号码注就是新的一笔
+        if buf and _subject_money(buf, sx_chars) and re.match(r"[0-9]", seg):
+            out.append(buf)
+            buf = seg
+            continue
         if _looks_priced(seg, sx_chars):
             out.append((buf + " " + seg).strip())
             buf = ""
         else:
             buf = (buf + " " + seg).strip()
     if buf:
-        if _FLAT_WORD.search(buf) or (out and _subject_amount(buf, sx_chars)):
+        if (_FLAT_WORD.search(buf) or (out and _subject_amount(buf, sx_chars))
+                # 末尾这段自己就带单价（"鼠50 30买100" 的 30买100），是独立一笔
+                or (out and _looks_priced(buf, sx_chars))):
             out.append(buf)            # 12/13/14 的最后一笔 / "鼠 50 牛 30" 的最后一段
         elif out:
             out[-1] += " " + buf
