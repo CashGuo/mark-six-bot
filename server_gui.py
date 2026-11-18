@@ -1218,6 +1218,8 @@ class MainWindow:
         tv.tag_configure("ok", foreground="#2b8a5f")
         tv.tag_configure("bad", foreground="#c0392b")
         tv.tag_configure("skip", foreground="#8a8f98")
+        # 客户撤回导致的冲正：真金白银动了，不能跟"跳过"一样用灰字混在里头
+        tv.tag_configure("warn", foreground="#b45309")
         tv.bind("<<TreeviewSelect>>", self._on_msg_select)
         tv.bind("<Double-1>", self._on_msg_double)
         self.tv_msg = tv
@@ -1305,6 +1307,10 @@ class MainWindow:
                 else:
                     label = base
                     tag = "ok"
+            elif res in ("已冲正", "撤回待核对", "已撤回"):
+                # 客户撤回：已冲正的橙字提醒（账真被扣回去了），另两种是"还没动账"，灰字
+                label = res if (not reason or reason in res) else "%s · %s" % (res, reason)
+                tag = "warn" if res == "已冲正" else "skip"
             else:
                 label = ("%s · %s" % (res, reason)) if reason else res
                 tag = "bad" if res == "未解析" else "skip"

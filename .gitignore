@@ -9,6 +9,7 @@ __pycache__/
 .env
 
 # 编译产物与构建环境（可重建，不进版本库）
+nuitka-crash-report.xml
 build/out/
 build/release/
 build/venv/

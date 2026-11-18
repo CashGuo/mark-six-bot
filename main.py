@@ -1107,96 +1107,118 @@ _load_processed()
 
 
 # ---- 跨账号内容指纹（同一群被两个微信号同时监听时挡重复）----
+#
+# 判重口径（和老板确认过）：同一个群、同一个人、同样的正文，只算一次注。
+# 所以指纹里**不带发送时间** —— 真实的「发重了」常常隔几秒，秒级时间戳一进指纹就漏挡。
+# 但不能永久判重：客户过一会儿真加双份是同一条文本也要记。
+# 折中：指纹 + 最近一次入账时间，窗口（FINGERPRINT_WINDOW 秒）内再撞就挡，超出窗口就放行。
+# 两个微信号同时监听同一个群时，同一条消息的 create_time 一致 → 差 0 秒 → 挡得住。
 
-_fp: List[str] = []
-_fp_set = set()
+FINGERPRINT_WINDOW = 30      # 秒；同内容在这个窗口内重复到达只记一次
+FINGERPRINT_TTL = 86400 * 7  # 指纹表保留 7 天，过期的不再参与判重（省内存也省文件）
+
+_fp: Dict[str, int] = {}     # 指纹 -> 最近一次入账的秒级时间
 _FP_LOCK = threading.Lock()
 
 
 def _load_fingerprints():
-    global _fp, _fp_set
-    if FINGERPRINT_FILE.exists():
-        try:
-            with open(FINGERPRINT_FILE, "r", encoding="utf-8") as f:
-                ids = json.load(f)
-            if isinstance(ids, list):
-                _fp = [str(x) for x in ids][-MAX_FINGERPRINTS:]
-                _fp_set = set(_fp)
-        except Exception:
-            pass
+    global _fp
+    if not FINGERPRINT_FILE.exists():
+        _fp = {}
+        return
+    try:
+        with open(FINGERPRINT_FILE, "r", encoding="utf-8") as f:
+            blob = json.load(f)
+        items = blob.get("items") if isinstance(blob, dict) else None
+        if isinstance(items, dict):
+            now = int(time.time())
+            _fp = {str(k): int(v) for k, v in items.items()
+                   if isinstance(v, (int, float)) and now - int(v) <= FINGERPRINT_TTL}
+        else:
+            # 旧版本存的是纯指纹 list（指纹里带时间，算法不同）→ 对不上，清空重来
+            _fp = {}
+    except Exception:
+        _fp = {}
 
 
 def _save_fingerprints():
     try:
         with _PERSIST_LOCK:
-            _atomic_write_json(FINGERPRINT_FILE, _fp[-MAX_FINGERPRINTS:])
+            _atomic_write_json(FINGERPRINT_FILE, {"v": 2, "items": dict(_fp)})
     except Exception as e:
         logger.warning(f"保存指纹失败：{e}")
 
 
 def msg_fingerprint(chat_id: str, create_time, sender, content: str) -> str:
-    """同一条消息在两个微信账号里 msg_id 可能不同（消息序号各自独立），
-    但 会话ID + 发送时间 + 发送人 + 正文 是一致的 → 用它跨账号判重。
+    """同一个群被两个微信号同时监听时，两条的 msg_id 不同，但
+    会话ID + 发送人 + 正文 是一致的 → 用它跨账号判重。
+
+    create_time 不参与：时间一进指纹，「隔几秒发重了」就挡不住（这是最常见的重发形态）。
+    时间放在表里当窗口用（见 claim_fingerprint）。
     """
-    raw = f"{chat_id}|{create_time}|{sender}|{(content or '').strip()}".encode("utf-8")
+    raw = f"{chat_id}|{sender}|{(content or '').strip()}".encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:32]
 
 
-def claim_fingerprint(fp: str) -> bool:
+def claim_fingerprint(fp: str, create_time=None) -> bool:
     """指纹查重 + 占位一步做完。
 
     两个微信号监听同一个群时，同一条内容会到两次（msg_id 不同）：
     先 is_fingerprint_seen 再 mark_fingerprint 的话，两条同时到时都会判"没见过"，
     于是同一个群被记两笔账。
+
+    create_time 传消息自己的时间（秒）：窗口按它算，两台机器时钟有点偏差也不影响
+    （判的是"这两条内容相隔多久"，不是"离现在多久"）。
     """
-    global _fp
     if not fp:
         return True
+    try:
+        ts = int(create_time) if create_time else int(time.time())
+    except Exception:
+        ts = int(time.time())
     with _FP_LOCK:
-        if fp in _fp_set:
+        last = _fp.get(fp)
+        if last is not None and abs(ts - last) <= FINGERPRINT_WINDOW:
             return False
-        _fp_set.add(fp)
-        _fp.append(fp)
+        _fp[fp] = ts
         if len(_fp) > MAX_FINGERPRINTS:
-            drop = len(_fp) - MAX_FINGERPRINTS
-            for x in _fp[:drop]:
-                _fp_set.discard(x)
-            _fp = _fp[drop:]
+            # 按时间丢最老的，别丢刚进来的
+            for k in sorted(_fp, key=lambda x: _fp[x])[:len(_fp) - MAX_FINGERPRINTS]:
+                _fp.pop(k, None)
     _save_fingerprints()
     return True
 
 
 def is_fingerprint_seen(fp: str) -> bool:
     with _FP_LOCK:
-        return fp in _fp_set
+        return fp in _fp
 
 
-def mark_fingerprint(fp: str):
-    global _fp
+def mark_fingerprint(fp: str, create_time=None):
+    if not fp:
+        return
+    try:
+        ts = int(create_time) if create_time else int(time.time())
+    except Exception:
+        ts = int(time.time())
     with _FP_LOCK:
-        if fp in _fp_set:
-            return
-        _fp_set.add(fp)
-        _fp.append(fp)
+        _fp[fp] = ts
         if len(_fp) > MAX_FINGERPRINTS:
-            drop = len(_fp) - MAX_FINGERPRINTS
-            for x in _fp[:drop]:
-                _fp_set.discard(x)
-            _fp = _fp[drop:]
+            for k in sorted(_fp, key=lambda x: _fp[x])[:len(_fp) - MAX_FINGERPRINTS]:
+                _fp.pop(k, None)
         _save_fingerprints()
 
 
 def unmark_fingerprint(fp: str) -> bool:
-    """撤销时把内容指纹放出来，否则同一个群另一个号重推还会被判成跨账号重复。"""
-    global _fp
+    """撤销时把内容指纹放出来，否则同一个群另一个号重推还会被判成重复。"""
     if not fp:
         return False
     with _FP_LOCK:
-        if fp not in _fp_set:
+        if fp not in _fp:
             return False
-        _fp_set.discard(fp)
-        _fp = [x for x in _fp if x != fp]
+        _fp.pop(fp, None)
         _save_fingerprints()
+
     return True
 
 
@@ -1237,6 +1259,16 @@ def cache_reply(msg_id: str, reply: dict):
         _reply_cache.move_to_end(msg_id)
         while len(_reply_cache) > _REPLY_CACHE_MAX:
             _reply_cache.popitem(last=False)
+
+
+def drop_reply(msg_id: str):
+    """撤回时把这条的「已记账」回执作废。
+
+    不作废的话，采集端超时重推来取回执，会拿到「已记账 ¥200」照样发给客户 ——
+    账已经冲回去了，客户却收到一句"记上了"。
+    """
+    with _REPLY_LOCK:
+        _reply_cache.pop(msg_id, None)
 
 
 def fetch_reply_state(msg_id: str) -> Tuple[str, dict]:
@@ -1664,12 +1696,15 @@ def issue_summary(account=None, limit: int = 60) -> Dict[str, object]:
 def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
                sender_name: str = "", account: str = "",
                fp: str = "", chat_id: str = "", create_time=None,
-               market: str = "", allow_after_close: bool = False) -> dict:
+               market: str = "", allow_after_close: bool = False,
+               srv_id: str = "") -> dict:
     """一单：解析 → 累加 → 落盘。返回结果 dict（供接口/日志用）。
 
     account 决定落到哪个账号的账本；空则落 DEFAULT_ACCOUNT。
     fp / chat_id / create_time 只为了以后能撤销这一笔：撤销要把消息号和
     内容指纹都放出来，不存下来就找不回去。
+    srv_id 是微信服务端的消息 id：客户的「撤回」只带这一个 id（拿不到原文），
+    存下来才能在撤回时精确找到该冲正哪一笔。
     market 是盘口覆盖：控制台手工记账已经用「澳门/香港」开关明确选了，
     就按它落账，不再看文本里有没有「港」；留空仍按文本判（微信推送走这条）。
     allow_after_close 只有手工记账会传 True —— 开奖后老板补记客户电话/纸单
@@ -1823,6 +1858,8 @@ def record_bet(text: str, msg_id: str, chat_name: str = "", sender: str = "",
             "extras": seg["extras"], "extra_total": round(extra_total, 2),
             # 撤销要把消息号和指纹放开，得先把它们存下来
             "fp": fp, "chat_id": chat_id, "create_time": create_time,
+            # 微信服务端消息 id：客户撤回只带这个，撤回时按它反查是哪一笔
+            "srv_id": str(srv_id or ""),
             "issue": issue,
             "grand_total": round(grand_total, 2),
             "top": [{"num": n, "amount": round(a, 2)} for n, a in top],
@@ -2091,6 +2128,138 @@ def reverse_record(msg_id: str, note: str = "") -> dict:
 
 
 _reversed_cache: Dict[str, object] = {"key": None, "val": set()}
+
+
+# ======================== 客户撤回 ========================
+#
+# 采集端只做数据搬运：撤回提示里带过来的只有「被撤那条的服务端消息 id」（srv_id），
+# 原文拿不到。撤不撤、撤哪一笔、撤多少，全在这里定。
+#
+# 三分支都不阻塞其它消息：
+#   已经记账了        → 按 srv_id 找到那笔，走 reverse_record 冲正
+#   收到但没记账      → 挂预登记，等它真落账时拦住（比如正在等模型、已开奖、没解析出来）
+#   压根还没到        → 挂预登记带 TTL，等它到了拦住；超时就标「待核对」交给老板
+# 挂预登记是内存 + 落盘的小表，不占任何锁，也不排队等谁。
+
+REVOKE_PENDING_FILE_NAME = "pending_revokes.json"
+REVOKE_PENDING_TTL = 600      # 预登记最多等 10 分钟（采集端轮询窗口 3 分钟，留足余量）
+
+_rev_lock = threading.Lock()
+_rev_pending: Dict[str, dict] = {}   # srv_id -> {ts, account, chat, sender, text}
+
+
+def _revoke_file():
+    return DATA_DIR / REVOKE_PENDING_FILE_NAME
+
+
+def _load_revokes():
+    global _rev_pending
+    try:
+        p = _revoke_file()
+        if p.exists():
+            blob = json.loads(p.read_text(encoding="utf-8"))
+            items = blob.get("items") if isinstance(blob, dict) else None
+            if isinstance(items, dict):
+                now = int(time.time())
+                _rev_pending = {str(k): v for k, v in items.items()
+                                if isinstance(v, dict)
+                                and now - int(v.get("ts") or 0) <= REVOKE_PENDING_TTL}
+    except Exception as e:
+        logger.warning(f"读取撤回预登记失败：{e}")
+
+
+def _save_revokes():
+    try:
+        with _PERSIST_LOCK:
+            _atomic_write_json(_revoke_file(), {"items": dict(_rev_pending)})
+    except Exception as e:
+        logger.warning(f"保存撤回预登记失败：{e}")
+
+
+def revoke_pending_for(srv_id: str) -> dict:
+    """这条消息是不是已经被客户撤回了（挂着的预登记）。命中即消费掉。"""
+    srv_id = str(srv_id or "").strip()
+    if not srv_id:
+        return {}
+    with _rev_lock:
+        now = int(time.time())
+        for k in [k for k, v in _rev_pending.items()
+                  if now - int(v.get("ts") or 0) > REVOKE_PENDING_TTL]:
+            _rev_pending.pop(k, None)          # 顺手清过期的
+        hit = _rev_pending.pop(srv_id, None)
+    if hit is not None:
+        _save_revokes()
+        return hit or {}
+    return {}
+
+
+def revoke_pending_put(srv_id: str, account: str, chat: str, sender: str, text: str) -> bool:
+    srv_id = str(srv_id or "").strip()
+    if not srv_id:
+        return False
+    with _rev_lock:
+        if srv_id in _rev_pending:
+            return False
+        _rev_pending[srv_id] = {"ts": int(time.time()), "account": account,
+                                "chat": chat, "sender": sender, "text": text[:200]}
+    _save_revokes()
+    return True
+
+
+def find_msg_id_by_srv(srv_id: str, account: str = "") -> str:
+    """按微信服务端消息 id 找当初记账用的 msg_id。
+
+    撤回只给这一个 id，不给原文。扫当期流水即可（一期几百条），撤回也不频繁。
+    只看「记账」记录，冲正记录不算 —— 已经冲过一次的不能再找一遍。
+    """
+    srv_id = str(srv_id or "").strip()
+    if not srv_id:
+        return ""
+    accs = [account] if account else all_accounts()
+    for r in reversed(iter_records(account if account else None)):
+        if str(r.get("type") or "") == "reversal":
+            continue
+        if str(r.get("srv_id") or "") == srv_id:
+            return str(r.get("msg_id") or "")
+    return ""
+
+
+def handle_revoke(srv_id: str, account: str, raw: dict, rev_msg_id: str = "") -> dict:
+    """处理一条撤回提示。返回 {ok, reversed, reason}。"""
+    srv_id = str(srv_id or "").strip()
+    chat = str(raw.get("chat_name") or raw.get("chat_id") or "")
+    sender = str(raw.get("sender_name") or raw.get("sender") or "")
+    if not srv_id:
+        logger.warning(f"[撤回] 撤回提示里没有消息 id，忽略：{chat} {sender}")
+        return {"ok": False, "reversed": False,
+                "reason": "撤回提示里没有原消息 id，无法定位"}
+
+    target = find_msg_id_by_srv(srv_id, account)
+    if target:
+        res = reverse_record(target, note="客户撤回")
+        if res.get("ok"):
+            drop_reply(target)
+            logger.warning(f"[撤回] {account} 已冲正 {target}（srv={srv_id}）"
+                           f" 原文={res.get('text')} 减={res.get('total')}")
+            return {"ok": True, "reversed": True, "msg_id": target,
+                    "total": res.get("total"), "reason": "已冲正 ¥%s"
+                    % _fmt_money(res.get("total"))}
+        err = str(res.get("error") or "")
+        if "已经撤销过" in err:
+            return {"ok": True, "reversed": False, "reason": "这笔之前已经撤过了"}
+        logger.warning(f"[撤回] {account} 找到 {target} 但冲正失败：{err}")
+        return {"ok": False, "reversed": False, "reason": err or "冲正失败"}
+
+    # 还没记账（要么正在算、要么已开奖没记、要么还没到）→ 挂预登记等它
+    revoke_pending_put(srv_id, account, chat, sender,
+                       str(raw.get("content") or "")[:200])
+    logger.info(f"[撤回] {account} srv={srv_id} 还没落账，已挂预登记"
+                f"（{REVOKE_PENDING_TTL} 秒内到就拦住）")
+    return {"ok": True, "reversed": False,
+            "reason": "还没落账，已登记，落账时自动拦住"}
+
+
+_load_revokes()
 
 
 def reversed_msg_ids() -> set:
@@ -2481,6 +2650,19 @@ def wx_hook():
         mark_pending(msg_id)
         try:
             mtype = str(m.get("msg_type") or "")
+
+            # 客户撤回：采集端只搬上来「被撤那条的服务端消息 id（srv_id）」，
+            # 原文拿不到。撤不撤、撤哪一笔由这里定，且绝不阻塞别的消息：
+            # 已记账 → 立刻冲正；还没落账 → 挂预登记，等它真落账时拦住。
+            revoke_of = str(m.get("revoke_of") or "").strip()
+            if revoke_of:
+                acc = resolve_account(m.get("account") or default_acc)
+                ev = handle_revoke(revoke_of, acc, m, msg_id)
+                skipped += 1
+                msg_rows.append(_row(m, "已冲正" if ev.get("reversed") else "撤回待核对",
+                                     ev.get("reason") or "", acc=acc))
+                continue
+
             if mtype in SKIP_TYPES:
                 skipped += 1
                 msg_rows.append(_row(m, "跳过", "不记账的会话"))
@@ -2499,20 +2681,35 @@ def wx_hook():
                 continue
 
             acc = resolve_account(m.get("account") or default_acc)
-            # 同一群被两个微信号同时监听时：msg_id 各自独立，靠内容指纹挡第二份
+
+            # 撤回可能比原消息先到（两个号监听、网络先后不一）。
+            # 这条是不是已经被客户撤回了？命中就一个字都别记，也别回执。
+            srv_id = str(m.get("srv_id") or "").strip()
+            if srv_id:
+                hit_rev = revoke_pending_for(srv_id)
+                if hit_rev:
+                    skipped += 1
+                    msg_rows.append(_row(m, "已撤回", "客户已撤回这条，未记账", acc=acc))
+                    logger.warning(f"[撤回] {acc} 这条在被撤之后才到，跳过记账："
+                                   f"{content[:40]}")
+                    continue
+
+            # 同一群被两个微信号同时监听时：msg_id 各自独立，靠内容指纹挡第二份。
+            # 窗口内（FINGERPRINT_WINDOW 秒）同群同人同内容只记一次 —— 隔几秒的重发也挡得住。
             fp = msg_fingerprint(str(m.get("target_id") or m.get("chat_id") or ""),
                                  m.get("create_time"), str(m.get("sender") or ""), content)
-            if not claim_fingerprint(fp):
-                logger.info(f"[跨账号重复] {acc} {content[:40]}")
+            if not claim_fingerprint(fp, m.get("create_time")):
+                logger.info(f"[重复] {acc} {content[:40]}")
                 skipped += 1
-                msg_rows.append(_row(m, "跳过", "另一个号已经收过", acc=acc))
+                msg_rows.append(_row(m, "跳过", "这条重复了，只记一次", acc=acc))
                 continue
 
             r = record_bet(content, msg_id, m.get("chat_name") or "",
                            str(m.get("sender") or ""), str(m.get("sender_name") or ""),
                            account=acc, fp=fp,
                            chat_id=str(m.get("target_id") or m.get("chat_id") or ""),
-                           create_time=m.get("create_time"))
+                           create_time=m.get("create_time"),
+                           srv_id=srv_id)
             # 本期已开奖：不记账，但消息要留痕（老板要对账），还要回一句说清楚，
             # 不然客户以为记上了，开奖后对不上账。
             if r.get("closed"):
@@ -3760,7 +3957,7 @@ def route_reset():
             _save_processed()
             with _FP_LOCK:
                 _fp.clear()
-                _fp_set.clear()
+                _fp.clear()
                 _save_fingerprints()
 
     logger.warning(f"账本已被 /reset 清空：{'、'.join(targets)}（全清={every}）")

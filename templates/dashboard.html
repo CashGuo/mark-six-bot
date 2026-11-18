@@ -131,6 +131,7 @@ td.who{white-space:nowrap;color:var(--blue);font-weight:700}
 .tc{text-align:center}
 .hot{color:var(--red);font-weight:700}
 .done{color:#9aa0a6}
+.warm{color:#b45309;font-weight:700}
 .empty{color:var(--dim);text-align:center;padding:16px 0;font-size:12.5px}
 .scroll{overflow:auto;max-height:clamp(200px,30vh,340px)}
 .oplink{color:var(--blue);cursor:pointer;font-weight:700;white-space:nowrap}
@@ -533,7 +534,9 @@ function renderMsg(){
               '" onclick="undo(this)">撤销</span>'; }
       } else {
         label = res + (reason ? ' · ' + (reason.length > 12 ? reason.slice(0,12) + '…' : reason) : '');
-        cls = (res === '未解析') ? 'hot' : 'done';
+        if (res === '未解析') cls = 'hot';
+        else if (res === '已冲正') cls = 'warm';   /* 客户撤回冲正：账动了，别用灰字 */
+        else cls = 'done';
       }
       return '<tr><td class="num2">' + esc(String(m.ts || '').slice(0,16)) + '</td>' +
         '<td>' + esc(m.account || m.cust || '') + '</td>' +
