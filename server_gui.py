@@ -443,6 +443,7 @@ class MainWindow:
         # 号码盘字号跟着格子大小走：窗口一缩，15 号的字就会挤成一团。
         # 这两个表存「当前字号」和「这一盘有几行」，缩放时只按行高重算字号。
         self._grid_font = {}
+        self._grid_sum_lb = {}
         self._grid_rows = {}
         self._risk_sig = {}
         self._rec_sig = None
@@ -620,10 +621,16 @@ class MainWindow:
         # 左上：澳门、香港两个号码盘，左澳右港同时显示。
         # 高度 = 全部高度的 60% 再让出下面「平特」那一块（固定 240），号码盘吃剩下的。
         garea = tk.Frame(left, bg=CLR_BG)
-        for mk, title in (("MO", " 澳门 号码盘 "), ("HK", " 香港 号码盘 ")):
+        # 两盘必须严格等宽：pack 的 expand 按「请求宽度」分剩余空间，一边金额
+        # 位数多就会把另一边挤窄（实测 799 / 493），字号也一大一小，看着乱。
+        # grid + uniform 是按列均分，跟内容无关。
+        garea.grid_rowconfigure(0, weight=1)
+        for i, (mk, title) in enumerate((("MO", " 澳门 号码盘 "), ("HK", " 香港 号码盘 "))):
+            garea.grid_columnconfigure(i, weight=1, uniform="board")
             gp = tk.LabelFrame(garea, text=title, font=FONT_B, bg=CLR_BG,
                                fg="#111827", bd=1, relief="groove")
-            gp.pack(side="left", fill="both", expand=True, padx=(0, 6))
+            gp.grid(row=0, column=i, sticky="nsew",
+                    padx=(0, 6) if i == 0 else 0)
             holder = tk.Frame(gp, bg=CLR_BG)
             holder.pack(fill="both", expand=True, padx=5, pady=5)
             self.grid_holder[mk] = holder
@@ -694,20 +701,27 @@ class MainWindow:
         bp = tk.LabelFrame(left, text=" 最近记账 ", font=FONT_B, bg=CLR_BG,
                            fg="#111827", bd=1, relief="groove")
 
-        # 三块的高度关系：号码盘钝 1 吃掉全部剩余，平特固定 240，最近记账固定 360。
+        # 三块的高度关系：号码盘吃掉全部剩余，平特固定 168，最近记账固定 205。
         # 用 grid 的 minsize + weight 钉死：pack 里 expand 那块会把后面的请求高度吃光，
         # 结果平特被压成 0（踩过），所以这里走 grid。
+        # 这两个数给得紧一点：以前 186/250 把高度吃掉了，号码盘只剩 287 高，
+        # 12 行一分每行 24 像素，字号再怎么调也大不了 —— 大屏上就显小。
         left.grid_columnconfigure(0, weight=1)
         # 不让 grid 子控件把 left 的请求尺寸顶大 —— 否则两个号码盘会把右边排序栏挤掉
         left.grid_propagate(False)
-        left.grid_rowconfigure(0, weight=1)
-        left.grid_rowconfigure(1, weight=0, minsize=186)
-        left.grid_rowconfigure(2, weight=0, minsize=250)
+        # 剩余高度按 5:2 分给号码盘和最近记账，平特按内容固定。
+        # 以前全是固定 minsize（168/205），1366×768 的屏上总需求超过可用高度，
+        # 号码盘被压到 159 像素高、12 行每行 13 像素，字号只能掉到 8 号。
+        left.grid_rowconfigure(0, weight=5, minsize=210)
+        left.grid_rowconfigure(1, weight=0, minsize=160)
+        left.grid_rowconfigure(2, weight=2, minsize=150)
         garea.grid(row=0, column=0, sticky="nsew")
         zbp.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-        zbp.grid_propagate(False)
+        # 这两块内部是 pack 排的：必须关 pack 的传播，否则它们按内容要高度，
+        # 把号码盘的纵向空间吃掉。grid_propagate 只管 grid 排的子控件，管不到。
+        zbp.pack_propagate(False)
         bp.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
-        bp.grid_propagate(False)
+        bp.pack_propagate(False)
 
 
         # 过滤条：按期看。选项是具体三个期（本期 / 前一期 / 前二期），
@@ -833,14 +847,19 @@ class MainWindow:
                 f = tk.Frame(holder, bg="#fafbfc", highlightbackground="#e3e7ec",
                              highlightthickness=1)
                 f.grid(row=r, column=c + 1, sticky="nsew", padx=1, pady=1)
+                # 格子内部按 42:58 分：左边是号码色块，右边金额。窗口拉大时
+                # 两边一起长，不会像定宽色块那样在大屏上缩成一小块、右边空一片。
+                f.grid_columnconfigure(0, weight=40, minsize=1)
+                f.grid_columnconfigure(1, weight=60, minsize=1)
+                f.grid_rowconfigure(0, weight=1)
                 num = tk.Label(f, text=cell["num"], font=FONT_NUM, bg=bg, fg="white",
                                relief="flat")
-                num.pack(side="left", padx=(5, 6))
+                num.grid(row=0, column=0, sticky="nsew")
                 # 0 元留空而不是写个「0」：一屏 12 行 × 4 格全是 0，数字会把真正
                 # 有注的号码埋掉。
                 amt = tk.Label(f, text=fmt_money(cell["amount"]) if cell["amount"] else "",
                                font=FONT_AMT, bg="#fafbfc", fg="#111827", anchor="w")
-                amt.pack(side="left")
+                amt.grid(row=0, column=1, sticky="nsew", padx=(5, 4))
                 cells_out.append((num, amt))
         # 本盘合计放进「49 号」那一列：只有马那一行用得到最后这一格，下面十行
         # 整列空着，正好竖着写本盘金额，宽度跟 49 格一样，看着是同一列
@@ -853,9 +872,11 @@ class MainWindow:
             inner.pack(expand=True)
             tk.Label(inner, text="本盘合计", font=FONT_S, bg=CLR_BG,
                      fg=CLR_MUTED).pack()
-            tk.Label(inner, text=zx_amt(total) or "0",
-                     font=("Microsoft YaHei UI", 15, "bold"),
-                     bg=CLR_BG, fg=CLR_RED).pack(pady=(1, 0))
+            sum_lb = tk.Label(inner, text=zx_amt(total) or "0",
+                              font=("Microsoft YaHei UI", 15, "bold"),
+                              bg=CLR_BG, fg=CLR_RED)
+            sum_lb.pack(pady=(1, 0))
+            self._grid_sum_lb[market] = sum_lb
         # 画完立刻按当前尺寸定一次字号，再把缩放事件挂上
         holder.bind("<Configure>", lambda _e, mk=market: self._rescale_grid(mk))
         self._rescale_grid(market)
@@ -1000,20 +1021,29 @@ class MainWindow:
             return                      # 还没排完版，等下一条 Configure
         cell_h = h / float(rows_n)
         cell_w = w / (max(1, len(cells) // rows_n) + 1.0)
-        # 行高决定字号上限，列宽再压一道：一格要同时放「01」和「100」
-        by_h = cell_h * 0.62
-        by_w = cell_w * 0.30
-        # 下限给到 10 号：再小就只剩一团糊，宁可让格子自己裁一点也不缩到看不清
-        size = int(max(10, min(15, min(by_h, by_w))))
+        # 行高决定字号上限，列宽再压一道：一格要同时放「01」和「10000」
+        # font 的 size 是 point，实际像素 = point * tk scaling，所以像素预算
+        # 要先除以缩放，否则 125% 屏上 20 像素的字会被算成 27 point 而裁掉。
+        try:
+            scale = float(holder.tk.call("tk", "scaling")) or 1.33
+        except Exception:
+            scale = 1.33
+        px_budget = min(cell_h * 0.92, cell_w * 0.25) / max(0.8, scale)
+        # 上限只做防御（60 号封顶），真正的约束来自格子尺寸。以前写死 15 号，
+        # 窗口再大也只给 15 号字 —— 这就是「号码盘字体非常小」的来源。
+        size = int(max(8, min(60, px_budget)))
         if size == self._grid_font.get(market):
             return
         self._grid_font[market] = size
         num_font = ("Consolas", size, "bold")
-        amt_font = ("Consolas", max(9, size - 1))
-        zod_font = ("Microsoft YaHei UI", max(9, size - 2), "bold")
+        # 金额跟着缩一档：号码是 2 位、金额最多 5 位，同号字会把格子撑破，
+        # 金额小一点正好在右边留出余量，号码能顶到格子高度。
+        amt_font = ("Consolas", max(9, int(size * 0.70)))
+        zod_font = ("Microsoft YaHei UI", max(9, int(size * 0.88)), "bold")
         for num, amt in cells:
             try:
-                num.configure(font=num_font, padx=3 if size < 11 else 5)
+                # 色块已经按格子比例铺开了，内部只留两像素边距，字号说话
+                num.configure(font=num_font, padx=2)
                 amt.configure(font=amt_font)
             except Exception:
                 pass
@@ -1023,6 +1053,13 @@ class MainWindow:
                     child.configure(font=zod_font)
                 except Exception:
                     pass
+        # 「本盘合计」也跟着放大：大屏上它就缩在右下角一小撮，红字看不出来
+        lb = (self._grid_sum_lb or {}).get(market)
+        if lb is not None:
+            try:
+                lb.configure(font=("Microsoft YaHei UI", max(12, int(size * 1.05)), "bold"))
+            except Exception:
+                pass
 
     # ---------- 监听对象 ----------
     # ---------- 配置 ----------
@@ -2585,11 +2622,36 @@ class MainWindow:
                 pass
 
 
-def run():
-    root = tk.Tk()
+def _enable_dpi_awareness():
+    """声明 DPI 感知 —— 必须在 tk.Tk() 之前调用。
+
+    Tk 建根窗口时就按当时的 DPI 把字号缩放算死了。等窗口建出来再声明
+    DPI 感知，Tk 那边还按 96 DPI 记着，而窗口已经按物理像素渲染，于是在
+    125% / 150% 缩放的屏上所有字都小一圈 —— 客户说的「号码盘字体非常小」。
+    """
     try:
         from ctypes import windll
-        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        return
+    for call in (lambda: windll.user32.SetProcessDpiAwarenessContext(-4),
+                 lambda: windll.shcore.SetProcessDpiAwareness(2),
+                 lambda: windll.shcore.SetProcessDpiAwareness(1),
+                 lambda: windll.user32.SetProcessDPIAware()):
+        try:
+            call()
+            return
+        except Exception:
+            continue
+
+
+def run():
+    _enable_dpi_awareness()
+    root = tk.Tk()
+    try:
+        # DPI 感知后 winfo_fpixels 拿到的是真实 DPI，按 1 point = dpi/72 像素
+        # 重设缩放，字号才跟系统缩放一致（不设就还是 96 DPI 的老坐标）。
+        dpi = float(root.winfo_fpixels("1i")) or 96.0
+        root.tk.call("tk", "scaling", max(1.0, dpi / 72.0))
     except Exception:
         pass
     try:
