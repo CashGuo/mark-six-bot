@@ -631,6 +631,9 @@ class MainWindow:
                                fg="#111827", bd=1, relief="groove")
             gp.grid(row=0, column=i, sticky="nsew",
                     padx=(0, 6) if i == 0 else 0)
+            # 号码盘不按「内容宽度」要尺寸：金额位数一多（12000 这种五位）
+            # 盘面就撑宽，把左边的容器顶破，右边的「总额排序」被挤出窗口。
+            gp.pack_propagate(False)
             holder = tk.Frame(gp, bg=CLR_BG)
             holder.pack(fill="both", expand=True, padx=5, pady=5)
             self.grid_holder[mk] = holder
