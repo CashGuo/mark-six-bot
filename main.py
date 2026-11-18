@@ -2242,8 +2242,8 @@ def handle_revoke(srv_id: str, account: str, raw: dict, rev_msg_id: str = "") ->
             logger.warning(f"[撤回] {account} 已冲正 {target}（srv={srv_id}）"
                            f" 原文={res.get('text')} 减={res.get('total')}")
             return {"ok": True, "reversed": True, "msg_id": target,
-                    "total": res.get("total"), "reason": "已冲正 ¥%s"
-                    % _fmt_money(res.get("total"))}
+                    "total": res.get("total"),
+                    "reason": "¥%s" % _fmt_money(abs(res.get("total") or 0))}
         err = str(res.get("error") or "")
         if "已经撤销过" in err:
             return {"ok": True, "reversed": False, "reason": "这笔之前已经撤过了"}
