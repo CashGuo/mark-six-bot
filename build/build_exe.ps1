@@ -34,6 +34,12 @@ $nuitkaArgs = @(
     "--output-dir=$Out",
     "--output-filename=MarkSixBot-$Stamp.exe",
     "--include-data-dir=$Root\templates=templates",
+    # 解析层外置：bet_rules / manual_plays 不打进 EXE（--nofollow-import-to），
+    # 运行时由 patch_loader 从用户目录 patch\ 或包内 patch_seed\ 加载。
+    # 原始脚本同时作为数据文件塞进包里：既当兜底，也是首次启动释放到用户目录的模板。
+    "--include-data-files=$Root\bet_rules.py=patch_seed\bet_rules.py",
+    "--include-data-files=$Root\manual_plays.py=patch_seed\manual_plays.py",
+    "--nofollow-import-to=bet_rules,manual_plays",
     "--enable-plugin=tk-inter",
     # openai SDK 里有靠 try/import 和间接引用才加载的子模块，静态分析会漏掉
     # （实测漏了 openai.resources.chat.chat，表现为运行时「AI 未返回答复」）。

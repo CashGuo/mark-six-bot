@@ -34,6 +34,10 @@ from tkinter import messagebox, ttk
 
 import msb_view
 import msb_paths as _paths
+# 解析层外置：必须在第一次 import bet_rules 之前跑。窗口自己的「手工记账预览」
+# 和服务端子进程用的是同一套规则文件，界面选的号才不会和服务端记的号对不上。
+import patch_loader
+patch_loader.install()
 # 手工记账要借规则解析器算「某个玩法是哪几个号」，用它保证界面选的号
 # 和文本规则算出来的号永远同一套（bet_rules 不碰 main，不会抢锁/建 app）
 import bet_rules
@@ -1132,6 +1136,70 @@ class MainWindow:
                           "手工记账不受这个时间限制（开奖后可以补录）。",
                  font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left").pack(
                      fill="x", padx=14, pady=(0, 10))
+
+        g4 = group("解析规则（叫法）")
+        # 生效路径必须看得见：改了 patch\ 里的文件、实际跑的却是 EXE 内置那份，
+        # 是最常见的一类"怎么改都不生效"。
+        _st = (patch_loader.STATUS.get("modules") or {}).get("bet_rules") or {}
+        _src = _st.get("source", "builtin")
+        _path = _st.get("path") or ""
+        row = tk.Frame(g4, bg=CLR_BG)
+        row.pack(fill="x", pady=(4, 0), padx=8)
+        tk.Label(row, text="规则来源", font=FONT, bg=CLR_BG, fg="#374151",
+                 width=12, anchor="w").pack(side="left")
+        tk.Label(row, text=("外部文件" if _src == "external" else "EXE 内置"),
+                 font=FONT_B, bg=CLR_BG,
+                 fg=(CLR_OK if _src == "external" else CLR_MUTED)).pack(side="left")
+        if _path:
+            tk.Label(row, text=_path, font=FONT_S, bg=CLR_BG, fg="#1f2937",
+                     anchor="w", justify="left", wraplength=400).pack(side="left", padx=(8, 0))
+
+        _patch_dir = Path(patch_loader.STATUS.get("seed_dir") or (_paths.HOME_DIR / "patch"))
+
+        def _open_rules():
+            try:
+                _patch_dir.mkdir(parents=True, exist_ok=True)
+                os.startfile(str(_patch_dir))
+            except Exception as e:
+                messagebox.showerror("打不开规则目录", "%s\n\n手动打开：%s" % (e, _patch_dir))
+
+        row2 = tk.Frame(g4, bg=CLR_BG)
+        row2.pack(fill="x", pady=(6, 2), padx=8)
+
+        def _restore_rules():
+            names = patch_loader.restore_factory()
+            if not names:
+                self._toast("用户目录里没有外置规则，本来就在用 EXE 内置的那份")
+                return
+            if messagebox.askyesno(
+                    "恢复出厂规则",
+                    "会用新版本内置的规则替换：\n\n%s\n\n旧文件会备份在同目录（.bak-日期时间），"
+                    "现在恢复吗？" % "、".join(names)):
+                try:
+                    patch_loader.install(force=True)
+                except Exception:
+                    pass
+                self._toast("已恢复出厂规则；「停止 → 启动」服务后生效")
+
+        tk.Button(row2, text="打开规则目录", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=_open_rules
+                  ).pack(side="left")
+        tk.Button(row2, text="恢复出厂规则", font=FONT_S, bg="#eef0f3", fg="#374151",
+                  relief="flat", bd=0, cursor="hand2", command=_restore_rules
+                  ).pack(side="left", padx=(6, 0))
+
+        _note = "加叫法改 bet_rules.py 里的 PLAYS 就行；改完「停止 → 启动」生效，不用重编。"
+        if "bet_rules.py" in (patch_loader.STATUS.get("kept") or []):
+            _note = "这两个文件你改过，没有随新版本更新；要用新版规则点「恢复出厂规则」。"
+        elif patch_loader.STATUS.get("updated"):
+            _note = "规则已随新版本自动更新（旧版备份在同目录 .bak-日期）。"
+        tk.Label(g4, text=_note, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left",
+                 wraplength=520, anchor="w").pack(fill="x", padx=14, pady=(4, 6))
+
+        for _err in patch_loader.errors():
+            tk.Label(g4, text="注意：" + _err, font=FONT_S, bg=CLR_BG, fg=CLR_BAD,
+                     justify="left", wraplength=540, anchor="w").pack(
+                         fill="x", padx=14, pady=(0, 4))
 
         tk.Label(wrap, text="改完点左下「保存配置」（本页底部按钮条）；"
                             "正在跑的服务要「停止 → 启动」才会用上新配置。",

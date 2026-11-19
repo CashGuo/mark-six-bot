@@ -40,6 +40,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+# 解析层外置：必须在第一次 import bet_rules 之前跑，否则拿到的是 EXE 内置那份。
+# 具体查找顺序与回退规则见 patch_loader.py。
+import patch_loader
+patch_loader.install()
+
 import bet_rules
 # 玩法表 + 选号逻辑跟控制台窗口共用一份，网页版不会算出第二个结果
 import manual_plays
