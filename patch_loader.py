@@ -223,6 +223,72 @@ def _load_from(name: str, path: Path):
     return mod
 
 
+def validate(name: str) -> dict:
+    """检查外置规则文件能不能加载 —— 改完先跑这个，别急着重启。
+
+    分三段查，越往后越贵：
+      1. 读文件 + compile()：抓语法错，能给出准确行号；
+      2. exec 到隔离的命名空间：抓语法查不出来的问题（正则编译、依赖缺失、
+         顶层代码报错），全程不碰 sys.modules，正在跑的规则不受影响；
+      3. 结构检查：PLAYS 在不在、有没有重复的 key、pattern 能不能编。
+
+    返回 {"ok": bool, "stage": "ok|none|read|syntax|load|shape",
+          "path": str, "line": int, "message": str, "detail": str}
+    """
+    path = _pick(name)
+    if path is None:
+        return {"ok": False, "stage": "none", "path": "", "line": 0,
+                "message": "没找到外部文件，当前用的是 EXE 内置的那份", "detail": ""}
+
+    try:
+        src = path.read_text(encoding="utf-8-sig")
+    except Exception as e:
+        return {"ok": False, "stage": "read", "path": str(path), "line": 0,
+                "message": "读文件失败：%s" % e, "detail": ""}
+
+    # 1) 语法
+    try:
+        compile(src, str(path), "exec")
+    except SyntaxError as e:
+        bad_line = (e.text or "").strip()
+        msg = "第 %d 行语法错误：%s" % (e.lineno or 0, e.msg)
+        if bad_line:
+            msg += "\n    " + bad_line
+        return {"ok": False, "stage": "syntax", "path": str(path),
+                "line": e.lineno or 0, "message": msg, "detail": ""}
+    except Exception as e:
+        return {"ok": False, "stage": "syntax", "path": str(path), "line": 0,
+                "message": "编译失败：%s: %s" % (type(e).__name__, e), "detail": ""}
+
+    # 2) 试加载（独立命名空间；manual_plays import bet_rules 时拿的是当前生效那份，
+    #    这也是它该有的行为 —— 校验的是"新文件接上现有环境"能不能跑）
+    try:
+        spec = importlib.util.spec_from_file_location("_validate_" + name, str(path))
+        if spec is None or spec.loader is None:
+            raise ImportError("无法为此文件创建加载器")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        return {"ok": False, "stage": "load", "path": str(path), "line": 0,
+                "message": "试加载失败：%s: %s" % (type(e).__name__, e), "detail": ""}
+
+    # 3) 结构（只对 bet_rules 有意义）
+    detail = ""
+    if name == "bet_rules":
+        plays = getattr(mod, "PLAYS", None)
+        if not isinstance(plays, list) or not plays:
+            return {"ok": False, "stage": "shape", "path": str(path), "line": 0,
+                    "message": "PLAYS 不存在或为空 —— 可能是保存时把整段删掉了", "detail": ""}
+        keys = [getattr(p, "key", "") for p in plays]
+        dup = sorted({k for k in keys if keys.count(k) > 1})
+        if dup:
+            detail = "重复的玩法 key：%s（不影响启动，但两条规则会互相抢匹配）" % "、".join(dup)
+        detail = ("%d 条玩法" % len(plays)) + (("；" + detail) if detail else "")
+
+    return {"ok": True, "stage": "ok", "path": str(path), "line": 0,
+            "message": "检查通过", "detail": detail}
+
+
 def restore_factory() -> list:
     """恢复出厂规则：把用户目录里的外置脚本备份后删掉，下次启动用包里那份。
 

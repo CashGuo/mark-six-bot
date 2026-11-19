@@ -1196,6 +1196,41 @@ class MainWindow:
         tk.Label(g4, text=_note, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left",
                  wraplength=520, anchor="w").pack(fill="x", padx=14, pady=(4, 6))
 
+        # 改完先检查，再决定要不要重启 —— 写坏的文件重启后会静默回退内置，
+        # 客户会以为"改了没生效"，所以这里必须能在不重启的前提下先拦住。
+        row3 = tk.Frame(g4, bg=CLR_BG)
+        row3.pack(fill="x", pady=(0, 2), padx=8)
+
+        def _check_rules():
+            res = [(n, patch_loader.validate(n)) for n in ("bet_rules", "manual_plays")]
+            bad = [r for _, r in res if not r["ok"]]
+            parts = []
+            for n, r in res:
+                if r["ok"]:
+                    parts.append("%s：通过%s" % (
+                        n, ("（%s）" % r["detail"]) if r.get("detail") else ""))
+                else:
+                    nm = Path(r["path"]).name if r.get("path") else n
+                    parts.append("%s：%s" % (nm, r["message"]))
+            if bad:
+                self.lb_rule_check.configure(
+                    text="没通过。服务还在用旧规则，改好之前别重启：\n" + "\n".join(parts),
+                    fg=CLR_BAD)
+            else:
+                self.lb_rule_check.configure(
+                    text="检查通过，可以「停止 → 启动」生效。\n" + "；".join(parts),
+                    fg=CLR_OK)
+
+        tk.Button(row3, text="检查规则文件", font=FONT_S, bg="#eef7ff", fg=CLR_BLUE2,
+                  relief="flat", bd=0, cursor="hand2", command=_check_rules
+                  ).pack(side="left")
+        tk.Label(row3, text="语法、正则、依赖有问题都会指出行号",
+                 font=FONT_S, bg=CLR_BG, fg=CLR_MUTED).pack(side="left", padx=(10, 0))
+
+        self.lb_rule_check = tk.Label(g4, text="", font=FONT_S, bg=CLR_BG, fg=CLR_MUTED,
+                                      justify="left", anchor="w", wraplength=540)
+        self.lb_rule_check.pack(fill="x", padx=14, pady=(0, 4))
+
         for _err in patch_loader.errors():
             tk.Label(g4, text="注意：" + _err, font=FONT_S, bg=CLR_BG, fg=CLR_BAD,
                      justify="left", wraplength=540, anchor="w").pack(
