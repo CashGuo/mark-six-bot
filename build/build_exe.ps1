@@ -17,6 +17,11 @@ foreach ($m in @("flask", "openai", "dotenv", "lunardate", "psutil")) {
     if ($LASTEXITCODE -ne 0) { throw "build\venv 里缺模块：$m" }
 }
 
+# 图标（2026-11-20 定案：红金账本）。缺了就当场停，别编出一个没图标的包
+if (-not (Test-Path -LiteralPath (Join-Path $Root "assets\app.ico"))) {
+    throw "缺图标：assets\app.ico（多尺寸 ico，由 build\assets\app.ico 复制而来）"
+}
+
 # 旧 EXE 正在跑会让 Remove-Item 报 Access denied
 Get-Process -Name "MarkSixBot" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 400
@@ -33,6 +38,13 @@ $nuitkaArgs = @(
     "--assume-yes-for-downloads",
     "--output-dir=$Out",
     "--output-filename=MarkSixBot-$Stamp.exe",
+    # 图标：Nuitka 自己的 --windows-icon-from-ico 在本机必失败 —— 包大了以后
+    # （main.dll 90MB+）UpdateResource 反复报 error 22，重试 5 次就 FATAL
+    # "the result is unusable"。所以图标改成出包后注入：
+    #     build\venv\Scripts\python.exe build\inject_icon.py <exe> assets\app.ico
+    # include-data-files 这一条要留着：Tk 主窗口靠它设标题栏/任务栏图标
+    # （server_gui._apply_app_icon 从 onefile 解包目录的 assets\app.ico 读）。
+    "--include-data-files=$Root\assets\app.ico=assets\app.ico",
     "--include-data-dir=$Root\templates=templates",
     # 解析层外置：bet_rules / manual_plays 不打进 EXE（--nofollow-import-to），
     # 运行时由 patch_loader 从用户目录 patch\ 或包内 patch_seed\ 加载。
@@ -74,6 +86,17 @@ try {
 
 $exe = Join-Path $Out "MarkSixBot-$Stamp.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "没生成 $exe" }
+
+# 图标：出包后注入（原因见上面 nuitkaArgs 里的注释）。
+$Ico = Join-Path $Root "assets\app.ico"
+$Injector = Join-Path $Root "build\inject_icon.py"
+if ((Test-Path -LiteralPath $Ico) -and (Test-Path -LiteralPath $Injector)) {
+    Write-Output "[build] 注入图标：$Ico"
+    & $Py $Injector $exe $Ico
+    if ($LASTEXITCODE -ne 0) { throw "图标注入失败（exe 已生成，但资源管理器里没图标）：$exe" }
+} else {
+    Write-Output "[build] 跳过图标注入：缺 assets\app.ico 或 build\inject_icon.py"
+}
 
 # 配置不再随包放：服务端第一次启动会在 %LOCALAPPDATA%\MarkSixBot\config\
 # 自己写一份出厂空壳（见 msb_paths.adopt_config），EXE 放只读目录也能改配置。

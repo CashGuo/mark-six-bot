@@ -169,12 +169,16 @@ td.who{white-space:nowrap;color:var(--blue);font-weight:700}
   <div id="viewBoard">
     <div class="topbar">
       <div class="sumwrap"><span class="sum-l">总金额</span><span class="sum" id="grand">0</span></div>
-      <span class="chip">本期 <b id="issue">—</b><span id="closeInfo"></span></span>
+      <!-- 账期：与桌面控制台顶栏同一个下拉（本期 / 前一期 / 前二期） -->
+      <span class="chip">账期</span>
+      <select class="sel" id="issueSel" onchange="onTopIssue(this.value)"></select>
       <span class="chip">生肖年 <b id="zyear">—</b></span>
       <span class="chip">号码盘 <b id="desk">0</b></span>
       <span class="chip">平特 <b id="flat">0</b></span>
       <span class="chip">本期已记账 <b id="krec">0</b></span>
       <span class="chip" id="unpChip" title="点这里看是哪几条消息">本期未解析 <b id="kunp">0</b></span>
+      <!-- 开奖封盘：与桌面控制台顶栏末位那一格同位置、同文案 -->
+      <span class="chip" id="closeInfo"></span>
       <span class="grow"></span>
       <a class="btn" href="/manual" target="_blank">手工记账</a>
       <span class="chip">账号</span>
@@ -255,7 +259,7 @@ td.who{white-space:nowrap;color:var(--blue);font-weight:700}
 ------------------------------------------------------------------ */
 let ACC = new URLSearchParams(location.search).get('account') || '';
 let S = null;            // 最近一次接口数据
-let SEL = '';            // 当前账期
+let SEL = new URLSearchParams(location.search).get('issue') || '';   // 当前账期；空 = 本期
 let MGSEL = '';          // 消息页账期
 let VIEW = 'board';
 let SCOPES = [];         // [{label, issue}]
@@ -295,11 +299,13 @@ function switchAcc(v){
   load();
 }
 
-/* ---------- 账期下拉（本期 / 前一期 / 前二期，与 GUI 同一份选项） ---------- */
+/* ---------- 账期下拉（本期 / 前一期 / 前二期，与 GUI 同一份选项） ----------
+   顶栏那个和「最近记账」那个是同一份选项、同一个状态：切哪个另一个跟着变
+   （桌面控制台就是顶栏下拉 + 最近记账下拉联动）。 */
 function syncScopes(list, cur){
   SCOPES = (list && list.length) ? list : [{label:'本期 ' + (cur || '—'), issue: cur || ''}];
   const sig = SCOPES.map(x => x.label).join('|');
-  ['recScope','msgScope'].forEach(function(id){
+  ['issueSel','recScope','msgScope'].forEach(function(id){
     const el = document.getElementById(id);
     if (el.dataset.sig === sig) return;
     el.dataset.sig = sig;
@@ -310,10 +316,12 @@ function syncScopes(list, cur){
   if (!SEL || !okS) SEL = SCOPES[0].issue;
   const okM = SCOPES.some(x => x.issue === MGSEL);
   if (!MGSEL || !okM) MGSEL = SEL;
+  document.getElementById('issueSel').value = SEL;
   document.getElementById('recScope').value = SEL;
   document.getElementById('msgScope').value = MGSEL;
 }
-function onScope(v){ SEL = v; renderRec(); }
+function onScope(v){ SEL = v; load(); }        /* 顶栏与最近记账两个下拉联动，切了整屏换期 */
+function onTopIssue(v){ SEL = v; load(); }
 function onMsgScope(v){ MGSEL = v; renderMsg(); }
 
 /* ---------- 开奖时间封盘 ---------- */
@@ -327,12 +335,13 @@ function fmtLeft(s){
 function paintCutoff(){
   const el = document.getElementById('closeInfo');
   if (!el) return;
+  /* 文案与桌面控制台顶栏那一格完全一样：已封盘（21:30 开奖） / 21:30 截止（剩 3 小时 12 分） */
   if (CUT.closed || CUT.left <= 0){
-    el.className = 'closed';
-    el.textContent = ' · 已封盘（' + (CUT.draw || '') + ' 开奖）';
+    el.className = 'chip closed';
+    el.textContent = '已封盘（' + (CUT.draw || '') + ' 开奖）';
   } else {
-    el.className = '';
-    el.textContent = ' · ' + CUT.draw + ' 截止（剩 ' + fmtLeft(CUT.left) + '）';
+    el.className = 'chip';
+    el.textContent = (CUT.draw || '') + ' 截止（剩 ' + fmtLeft(CUT.left) + '）';
   }
 }
 setInterval(function(){
@@ -347,7 +356,7 @@ setInterval(function(){
 function renderTop(){
   const d = S;
   document.getElementById('grand').textContent = fmt(d.grand_total);
-  document.getElementById('issue').textContent = d.issue || '—';
+  // 账期在下拉里显示（和桌面控制台一样），这一行不再重复写期号
   document.getElementById('zyear').textContent =
     (d.zodiac_year || '—') + '年' + (d.zodiac ? ' · ' + d.zodiac : '');
   // 「号码盘」只算逐号注（澳 + 港两本盘面之和），平特/连肖/组合注单独一个「平特」。
@@ -495,9 +504,12 @@ function renderRec(){
     rows.map(function(x){
       const rid = String(x.msg_id || x.rec_id || '');
       const done = !!x.reversed;
-      const op = done
-        ? '<span class="oplink off">已撤销</span>'
-        : '<span class="oplink" data-mid="' + esc(rid) + '" onclick="undo(this)">撤销</span>';
+      // 看的是归档期就只有账、不能撤（归档是只读底稿，与桌面控制台一致）
+      const op = S.archived_view
+        ? '<span class="oplink off">—</span>'
+        : (done
+          ? '<span class="oplink off">已撤销</span>'
+          : '<span class="oplink" data-mid="' + esc(rid) + '" onclick="undo(this)">撤销</span>');
       return '<tr><td class="num2">' + esc(String(x.ts || '').slice(0,16)) + '</td>' +
         '<td class="num2">' + esc(x.issue || '') + '</td>' +
         '<td>' + esc(String(x.chat || x.chat_name || '').slice(0,24)) + '</td>' +
@@ -533,7 +545,7 @@ function renderMsg(){
       if (res === '记账'){
         label = '记账' + (amt == null ? '' : ' ¥' + fmt(amt));
         if (m.reversed){ cls = 'done'; label = '已撤销 · 原 ' + label; }
-        else { cls = ''; op = '<span class="oplink" data-mid="' + esc(m.msg_id || '') +
+        else if (!S.archived_view) { cls = ''; op = '<span class="oplink" data-mid="' + esc(m.msg_id || '') +
               '" onclick="undo(this)">撤销</span>'; }
       } else {
         label = res + (reason ? ' · ' + (reason.length > 12 ? reason.slice(0,12) + '…' : reason) : '');
@@ -586,12 +598,17 @@ async function undo(el){
 /* ---------- 主循环 ---------- */
 async function load(){
   try{
-    const r = await fetch('/api/board' + (ACC ? '?account=' + encodeURIComponent(ACC) : ''));
+    // 账期作为参数带上：看归档期时接口读 issues\<期号>.json，和桌面控制台同一份数据
+    const q = new URLSearchParams();
+    if (ACC) q.set('account', ACC);
+    if (SEL) q.set('issue', SEL);
+    const r = await fetch('/api/board' + (q.toString() ? ('?' + q.toString()) : ''));
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || '读取失败');
     S = d;
+    if (!SEL) SEL = d.issue || '';
     syncAccounts(d.accounts);
-    syncScopes(d.issue_options, d.issue);
+    syncScopes(d.issue_options, d.cur_issue || d.issue);
     CUT = {left: Number(d.seconds_left || 0), draw: d.draw_time || '', closed: !!d.closed};
     renderTop(); paintCutoff();
     renderBoard('MO'); renderBoard('HK');

@@ -50,7 +50,7 @@ import bet_rules
 import manual_plays
 import msb_view
 import msb_paths
-from msb_paths import APP_DIR, DATA_DIR, CONFIG_PATH
+from msb_paths import APP_DIR, DATA_DIR, CONFIG_PATH, HOME_DIR
 
 # 源码模式注入 venv（打包后不会命中）
 SITE_PACKAGES = APP_DIR / "venv" / "Lib" / "site-packages"
@@ -133,6 +133,22 @@ def cfg(json_key: str, env_key: str, default: str = "") -> str:
 WX_PUSH_SECRET = cfg("wx_push_secret", "WX_PUSH_SECRET")
 WX_SKEW_SEC = int(cfg("wx_skew_sec", "WX_SKEW_SEC", "300") or 300)
 WX_SKIP_VERIFY = cfg("wx_skip_verify", "WX_SKIP_VERIFY", "0") == "1"
+
+
+def _int_cfg(json_key: str, env_key: str, default: int, lo: int, hi: int) -> int:
+    """读一个整数配置，越界或不是数字就用默认值，不让一个手误的配置让服务起不来。"""
+    try:
+        v = int(float(cfg(json_key, env_key, str(default)) or default))
+    except Exception:
+        v = default
+    return max(lo, min(hi, v))
+
+
+# 数据保留天数（2026-11-21 客户要求）：消息流水、运行日志、备份、归档期次
+# 统一按这一个值自动清理，控制台「配置」页的「保留天数」可改，默认 7 天。
+# 以前这三处各写一个常量（消息 7 / 日志 30 / 备份 7），客户问"到底留多久"答不上来，
+# 也没法改；账本里的当期账本与记账流水不在清理范围内，只清按日期归档的旧期次。
+KEEP_DAYS = _int_cfg("keep_days", "KEEP_DAYS", 7, 1, 3650)
 
 
 def _parse_account_secrets(s: str) -> Dict[str, str]:
@@ -223,6 +239,9 @@ LLM_TIMEOUT = int(cfg("llm_timeout", "LLM_TIMEOUT", "60") or 60)
 # qwen3.8 默认开思考：实测 8 条下注文本 86.9s、且 03头 解析成 "0"；
 # 关掉后 8.6s、8/8 正确。所以默认关闭，可用 LLM_THINKING=1 打开做对照。
 LLM_THINKING = cfg("llm_thinking", "LLM_THINKING", "0") == "1"
+# 2026-11-21 客户要求：大模型总开关，配置页勾选，默认不启用（只用本地规则）。
+# 关掉时连模型都不调，规则吃不下的写法直接记「未解析」，等人工补。
+LLM_ENABLED = cfg("llm_enabled", "LLM_ENABLED", "0") == "1"
 
 PORT = int(cfg("port", "PORT", "8899") or 8899)
 HOST = cfg("host", "HOST", "0.0.0.0") or "0.0.0.0"
@@ -238,8 +257,13 @@ def config_problems() -> List[str]:
     早点把"去白名单新增"这件事摆到面前，比开着一个假装正常的服务强。
     """
     out: List[str] = []
-    if not LLM_API_KEY:
-        out.append("没填大模型 API Key —— 去控制台「配置」页的「大模型」那一行填")
+    # 大模型只在勾了「启用」时才要求配置齐；没启用时不用 Key 也能跑
+    if LLM_ENABLED:
+        _miss = [n for n, v in (("API Key", LLM_API_KEY), ("接口地址", LLM_BASE_URL),
+                                ("模型名", LLM_MODEL)) if not str(v or "").strip()]
+        if _miss:
+            out.append("已启用大模型，但没填 %s —— 去控制台「配置」页补上，"
+                       "或者把「启用」取消掉" % "、".join(_miss))
     wl = load_clients()
     if wl["error"]:
         out.append("白名单文件读不出来（%s），请检查：%s" % (wl["error"], CLIENTS_PATH))
@@ -390,14 +414,24 @@ def release_lock():
 
 # ======================== 日志 ========================
 
-def cleanup_old_files(directory: Path, days: int, pattern: str):
+def cleanup_old_files(directory: Path, days: int, pattern: str) -> int:
+    """删掉目录里超过 days 天的旧文件，返回删了几个。
+
+    单个文件删不掉（被别的程序开着、没权限）只跳过，不能让整个清理停下。
+    """
+    removed = 0
     cutoff_date = datetime.now() - timedelta(days=days)
     for file in directory.glob(pattern):
         if file.is_file():
             file_time = datetime.fromtimestamp(file.stat().st_mtime)
             if file_time < cutoff_date:
-                file.unlink()
-                print(f"已删除旧文件：{file.name}")
+                try:
+                    file.unlink()
+                    removed += 1
+                    print(f"已删除旧文件：{file.name}")
+                except Exception:
+                    continue
+    return removed
 
 
 def setup_logging():
@@ -411,7 +445,10 @@ def setup_logging():
             logging.StreamHandler(),
         ],
     )
-    cleanup_old_files(LOG_DIR, days=30, pattern="bot_*.log")
+    # 运行日志按统一保留天数清。console_*.log 是控制台把服务输出重定向出来的那份，
+    # 以前只清 bot_*.log，console 那份一年年攒着没人管（客户机器上最老的一份 2.6MB）。
+    cleanup_old_files(LOG_DIR, days=KEEP_DAYS, pattern="bot_*.log")
+    cleanup_old_files(LOG_DIR, days=KEEP_DAYS, pattern="console_*.log")
     return logging.getLogger(__name__)
 
 
@@ -771,8 +808,11 @@ def backup_data(manual=False, account=None) -> str:
             shutil.copy2(src, dst)
             saved.append(str(dst))
         if saved:
-            cleanup_old_files(f["backup"], days=7, pattern="numbers_state_*.json")
-            cleanup_old_files(f["backup"], days=7, pattern="others_state_*.json")
+            # 备份也跟着统一保留天数走。备份目录里的 records.jsonl / unparsed.jsonl
+            # 以前没人清，攒久了比账本本身还大。
+            for pat in ("numbers_state_*.json", "others_state_*.json",
+                        "records.jsonl", "unparsed.jsonl"):
+                cleanup_old_files(f["backup"], days=KEEP_DAYS, pattern=pat)
             return saved[0]
         return ""
     except Exception:
@@ -967,6 +1007,10 @@ def _items_to_extras(items: List[dict], zodiac_mapping: Dict[str, List[str]]) ->
 
 def parse_bet_text_full(text: str, zodiac_mapping: Dict[str, List[str]]) -> tuple:
     """调模型解析，返回 ({号码: 金额}, [整笔注...])。失败返回 ({}, [])。"""
+    if not LLM_ENABLED:
+        # 总开关没开：一步都不发，交给调用方按「未解析」处理
+        logger.info("大模型未启用，跳过模型解析：%s" % (text or "")[:40])
+        return {}, []
     kwargs = dict(
         model=LLM_MODEL,
         messages=[
@@ -1290,10 +1334,10 @@ def fetch_reply_state(msg_id: str) -> Tuple[str, dict]:
 # ======================== 消息流水（客户要看"到底收到了什么"） ========================
 #
 # 和采集端的 messages_*.log 是一对：那边记"我采到了它"，这边记"我拿它干了什么"。
-# 只留 7 天，按天一个文件，过期自动删 —— 客户不会来清，得自己长记性。
+# 按统一的保留天数清（控制台「配置」页的「保留天数」，默认 7 天），按天一个文件。
 
 MSG_DIR = DATA_DIR / "messages"
-MSG_KEEP_DAYS = 7
+MSG_KEEP_DAYS = KEEP_DAYS
 
 
 def _msg_dir() -> Path:
@@ -1336,6 +1380,362 @@ def prune_messages(keep_days: int = MSG_KEEP_DAYS) -> int:
     except Exception:
         return 0
     return removed
+
+
+_ISSUE_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.json$")
+# 从 records.jsonl 裁下来的旧明细，按期放在 issues/ 下，跟归档账本做邻居
+_REC_ARCHIVE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}|unknown)\.records\.jsonl$")
+
+
+def _cutoff_ts(keep_days: int) -> float:
+    try:
+        return time.time() - max(1, int(keep_days)) * 86400
+    except Exception:
+        return time.time() - 7 * 86400
+
+
+def _line_ts(rec: dict) -> float:
+    """一条流水的时间：认 ts 字段，解析不了退回 create_time，都没有算 0（当作新的留着）。"""
+    try:
+        return datetime.strptime(str(rec.get("ts") or "")[:19],
+                                 "%Y-%m-%d %H:%M:%S").timestamp()
+    except Exception:
+        pass
+    try:
+        ct = rec.get("create_time")
+        if ct:
+            return float(ct)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _append_issue_records(account: str, rows: List[dict]) -> int:
+    """把裁下来的旧流水按期追加到 issues/<期号>.records.jsonl。"""
+    d = STATE_DIR / account / "issues"
+    d.mkdir(parents=True, exist_ok=True)
+    groups: Dict[str, List[dict]] = {}
+    for r in rows:
+        iss = str(r.get("issue") or "").strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", iss):
+            iss = "unknown"
+        groups.setdefault(iss, []).append(r)
+    n = 0
+    for iss, rs in groups.items():
+        with open(d / (iss + ".records.jsonl"), "a", encoding="utf-8") as f:
+            for r in rs:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                n += 1
+    return n
+
+
+def prune_records(keep_days: int = KEEP_DAYS) -> int:
+    """记账流水只留最近 N 天：超出的行先搬进 issues/<期号>.records.jsonl 再裁掉。
+
+    为什么要搬：records.jsonl 是单文件从头累积的，界面每几秒读一次它的尾部，
+    不裁就会越读越慢；但账务明细不能凭空消失，所以先归档明细、再裁主文件。
+    归档的 .records.jsonl 同样进 prune_archives 的清理，最后还是"只留 N 天"。
+    搬不动（写归档失败）就整份留着不裁 —— 宁可多留，也不能丢了明细只留个空账。
+    """
+    cutoff = _cutoff_ts(keep_days)
+    moved = 0
+    for acc in all_accounts():
+        try:
+            p = account_files(acc)["records"]
+        except Exception:
+            continue
+        if not p.exists():
+            continue
+        keep_lines: List[str] = []
+        old_rows: List[dict] = []
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        rec = json.loads(ln)
+                    except Exception:
+                        continue          # 坏行本来也读不出来，顺手丢掉
+                    ts = _line_ts(rec)
+                    if ts and ts < cutoff:
+                        old_rows.append(rec)
+                    else:
+                        keep_lines.append(json.dumps(rec, ensure_ascii=False))
+        except Exception as e:
+            logger.warning(f"读流水失败（{acc}）：{e}")
+            continue
+        if not old_rows:
+            continue
+        try:
+            _append_issue_records(acc, old_rows)
+        except Exception as e:
+            logger.warning(f"归档旧流水失败，这次不裁（{acc}）：{e}")
+            continue
+        try:
+            tmp = p.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                if keep_lines:
+                    f.write("\n".join(keep_lines) + "\n")
+            os.replace(tmp, p)
+            moved += len(old_rows)
+        except Exception as e:
+            logger.warning(f"裁剪流水失败（{acc}）：{e}")
+            continue
+    return moved
+
+
+def prune_unparsed(keep_days: int = KEEP_DAYS) -> int:
+    """未解析清单同样只留 N 天：它是待人工补账的暂存，过了窗口也没人再翻。"""
+    cutoff = _cutoff_ts(keep_days)
+    total = 0
+    for acc in all_accounts():
+        try:
+            p = account_files(acc)["unparsed"]
+        except Exception:
+            continue
+        if not p.exists():
+            continue
+        keep_lines: List[str] = []
+        dropped = 0
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        rec = json.loads(ln)
+                    except Exception:
+                        dropped += 1
+                        continue
+                    ts = _line_ts(rec)
+                    if ts and ts < cutoff:
+                        dropped += 1
+                    else:
+                        keep_lines.append(json.dumps(rec, ensure_ascii=False))
+        except Exception as e:
+            logger.warning(f"读未解析清单失败（{acc}）：{e}")
+            continue
+        if not dropped:
+            continue
+        try:
+            tmp = p.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                if keep_lines:
+                    f.write("\n".join(keep_lines) + "\n")
+            os.replace(tmp, p)
+            total += dropped
+        except Exception as e:
+            logger.warning(f"裁剪未解析清单失败（{acc}）：{e}")
+            continue
+    return total
+
+
+def prune_archives(keep_days: int = KEEP_DAYS) -> int:
+    """删掉过期的历史期次归档：state/<账号>/issues/2026-11-17.json。
+
+    期号文件名就是 YYYY-MM-DD.json，只认这一种。当期账本（numbers_state*.json）
+    不在这一层，永远不清；记账流水 records.jsonl 由 prune_records 先归档再裁，
+    归档出来的 YYYY-MM-DD.records.jsonl 在这里按搬入时间一起清。
+    一律按统一保留天数硬清，不留"最新一份"的例外 —— 客户口径是"归档也不许超过 N 天"，
+    想对账就在窗口内对；窗口外的旧期认赔，不能靠豁免活下去。
+    """
+    removed = 0
+    try:
+        cutoff = time.time() - max(1, int(keep_days)) * 86400
+    except Exception:
+        cutoff = time.time() - 7 * 86400
+    try:
+        dirs = list(STATE_DIR.glob("*/issues"))
+    except Exception:
+        return 0
+    for d in dirs:
+        try:
+            files = [p for p in d.glob("*.json") if _ISSUE_FILE_RE.match(p.name)]
+            detail = [p for p in d.glob("*.records.jsonl")
+                      if _REC_ARCHIVE_RE.match(p.name)]
+        except Exception:
+            continue
+        for p in detail + files:
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+                    removed += 1
+            except Exception:
+                continue
+    return removed
+
+
+def _tree_newest_mtime(d: Path) -> float:
+    """一个目录里最新的文件时间；空目录退回目录自身的时间。
+
+    整体备份包按"包内最新的那个文件"算年龄，正在写的包不会被误删。
+    """
+    newest = 0.0
+    try:
+        for p in d.rglob("*"):
+            try:
+                if p.is_file():
+                    newest = max(newest, p.stat().st_mtime)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if not newest:
+        try:
+            newest = d.stat().st_mtime
+        except Exception:
+            newest = 0.0
+    return newest
+
+
+# 整体备份包的目录名前缀：打包前、清账前、手工留底。只认这几种，
+# 免得把用户自己放进 backups\ 的东西一起删了。
+_BACKUP_BUNDLE_PREFIX = ("_bak_", "before_pack_", "cleanup-", "selftest")
+
+
+def _prune_tree(d: Path, cutoff: float) -> int:
+    """递归删掉目录里所有超期文件，再把因此变空的子目录收掉。返回删了几个文件。"""
+    removed = 0
+    try:
+        files = [p for p in d.rglob("*") if p.is_file()]
+    except Exception:
+        return 0
+    for p in files:
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                removed += 1
+        except Exception:
+            continue
+    try:
+        subs = sorted([p for p in d.rglob("*") if p.is_dir()],
+                      key=lambda p: len(p.parts), reverse=True)
+        for sub in subs:
+            try:
+                if not any(sub.iterdir()):
+                    sub.rmdir()
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return removed
+
+
+def _prune_bundle(d: Path, cutoff: float) -> int:
+    """一个整体备份包：整包都过期就整包删，否则把包里超期的单个文件清掉、空壳收掉。
+
+    只按"包内最新文件"判龄会漏 —— 打包时会把更早的日志一起拷进来，
+    包本身还新、里面躺着八九天前的 log（盘点上最大的那两个就在这儿）。
+    客户口径是"什么都不许超过 N 天"，所以包里也得逐个文件过一遍。
+    """
+    removed = 0
+    if _tree_newest_mtime(d) < cutoff:
+        try:
+            shutil.rmtree(d)
+            return 1
+        except Exception as e:
+            logger.warning(f"删旧备份包失败（{d.name}）：{e}")
+            return 0
+    removed += _prune_tree(d, cutoff)
+    try:
+        if not any(p.is_file() for p in d.rglob("*")):
+            shutil.rmtree(d)
+            removed += 1
+    except Exception:
+        pass
+    return removed
+
+
+def prune_backup_bundles(keep_days: int = KEEP_DAYS) -> int:
+    """把过期内容从整体备份包里清掉（空包整包删）。
+
+    两类：HOME\\backups\\<包名>\\ 和 HOME\\_bak_<时间戳>\\。这些是打包/清账前留的
+    整份快照（自带 messages、logs、state 副本），一个包就是几百兆到几兆，
+    以前从来不进清理，所以全盘盘点时"超 N 天"的文件几乎都在这里。
+    认不出前缀的目录一律不碰（用户自己放进 backups\\ 的东西不能删）。
+    """
+    cutoff = _cutoff_ts(keep_days)
+    removed = 0
+    cands: List[Path] = []
+    try:
+        bd = HOME_DIR / "backups"
+        if bd.is_dir():
+            for p in bd.iterdir():
+                if p.is_dir() and p.name.lower().startswith(_BACKUP_BUNDLE_PREFIX):
+                    cands.append(p)
+    except Exception:
+        pass
+    try:
+        for p in HOME_DIR.glob("_bak_*"):
+            if p.is_dir():
+                cands.append(p)
+    except Exception:
+        pass
+    for d in cands:
+        removed += _prune_bundle(d, cutoff)
+    return removed
+
+
+def _prune_backups(keep_days: int) -> int:
+    """备份目录按账号分开放，逐个清：散文件按各文件名前缀，子目录同上。"""
+    total = 0
+    try:
+        dirs = [d for d in BACKUP_DIR.glob("*") if d.is_dir()]
+    except Exception:
+        return 0
+    cutoff = _cutoff_ts(keep_days)
+    for d in dirs:
+        # 「清账」时留的 _clear_<时间戳>\ 一层层往里塞，以前只 glob 顶层文件，
+        # 子目录里的旧账本副本一直清不掉（盘点上占了大头）。
+        try:
+            subs = [p for p in d.glob("_clear_*") if p.is_dir()]
+        except Exception:
+            subs = []
+        for sub in subs:
+            total += _prune_bundle(sub, cutoff)
+        for pat in ("numbers_state_*.json", "others_state_*.json",
+                    "records.jsonl", "unparsed.jsonl"):
+            try:
+                total += cleanup_old_files(d, keep_days, pat)
+            except Exception:
+                continue
+    return total
+
+
+def run_maintenance(keep_days: int = KEEP_DAYS) -> Dict[str, int]:
+    """跑一遍所有清理，返回各项删掉几个。
+
+    消息流水、运行日志、控制台日志、备份（散文件 + 子目录 + 整体备份包）、
+    历史期次归档，全按同一个 keep_days。
+    每项单独兜异常：某一项没权限或文件正被占用，不能连累其他项。
+    """
+    out: Dict[str, int] = {}
+
+    def _step(name, fn):
+        try:
+            out[name] = int(fn() or 0)
+        except Exception as e:
+            out[name] = 0
+            logger.warning(f"清理 {name} 失败：{e}")
+
+    _step("消息流水", lambda: prune_messages(keep_days))
+    _step("记账流水", lambda: prune_records(keep_days))
+    _step("未解析清单", lambda: prune_unparsed(keep_days))
+    _step("运行日志", lambda: cleanup_old_files(LOG_DIR, keep_days, "bot_*.log"))
+    _step("控制台日志", lambda: cleanup_old_files(LOG_DIR, keep_days, "console_*.log"))
+    _step("备份", lambda: _prune_backups(keep_days))
+    _step("备份包", lambda: prune_backup_bundles(keep_days))
+    _step("历史期次", lambda: prune_archives(keep_days))
+    # 跨自然日翻期也挂在这趟上：0 点不一定开机，开机后这一趟就会把该翻的期翻掉。
+    _step("翻期", lambda: len(roll_all_issues()))
+
+    done = "，".join(f"{k} {v}" for k, v in out.items() if v)
+    if done:
+        logger.info(f"维护完成（数据保留 {keep_days} 天）：{done}")
+    return out
 
 
 def tail_messages(limit: int = 200) -> List[dict]:
@@ -1545,6 +1945,90 @@ def _write_issue_marker(account, issue: str):
         os.replace(tmp, p)
     except Exception as e:
         logger.warning(f"写期号失败（{account} {issue}）：{e}")
+
+
+def _issue_has_content(account=None) -> bool:
+    """账本里还有没有钱。港澳两本、号码盘与不计号都看。"""
+    a = resolve_account(account)
+    for m in ("MO", "HK"):
+        try:
+            for v in load_data(a, m).values():
+                if float(v or 0) != 0:
+                    return True
+        except Exception:
+            pass
+        try:
+            if float((load_others(a, m) or {}).get("total") or 0) != 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def roll_issue_if_due(account=None) -> str:
+    """跨自然日就翻期：归档清零、记上新期号。返回翻到的新期，没到点返回空串。
+
+    时点严格按 0 点，不跟开奖时刻对齐 —— 客户口径：11-21 期的注，21:30 开奖后
+    本期账仍然算本期，要到 22 日 0 点才进入下一期（周日的注归下一个开奖日周二）。
+    这正是 issue_of 的切期口径，所以只要拿账本期号跟它比就行。
+
+    账本还有钱时先归档再翻：归档失败就不写新期号，否则上一期的钱会挂到新一期头上，
+    变成两期混账，比不翻更糟。空账只补期号、不写空归档文件，免得每期留一个 0 元文件。
+    """
+    a = resolve_account(account)
+    cur = current_issue(a)
+    due = issue_of()
+    if not cur or not due or cur >= due:
+        return ""
+    if _issue_has_content(a):
+        if not archive_issue(a, cur):
+            logger.warning(f"翻期失败：{a} {cur} 的账没归档成功，暂不翻到 {due}")
+            return ""
+    _write_issue_marker(a, due)
+    logger.info(f"跨自然日翻期：{a} {cur} → {due}")
+    return due
+
+
+def roll_all_issues() -> dict:
+    """所有账号逐个翻期，返回 {账号: 新期号}。"""
+    out = {}
+    try:
+        accs = all_accounts() or [DEFAULT_ACCOUNT]
+    except Exception:
+        accs = [DEFAULT_ACCOUNT]
+    for a in accs:
+        try:
+            new = roll_issue_if_due(a)
+            if new:
+                out[a] = new
+        except Exception as e:
+            logger.warning(f"翻期失败（{a}）：{e}")
+    return out
+
+
+def _common_issue() -> str:
+    """「全部账号」视图的期号：取各账号账本实际期号，只有一个值就显示它。
+
+    以前这里是按开奖日历算（issue_of），账本还挂着上一期时，顶栏显示今天的期号、
+    下面金额却是上一期的，屏幕上出现「本期 11-21 / 0 笔 / 3480 元」这种自相矛盾的组合。
+    """
+    issues = set()
+    try:
+        accs = all_accounts() or []
+    except Exception:
+        accs = []
+    for a in accs:
+        try:
+            v = current_issue(a)
+            if v:
+                issues.add(v)
+        except Exception:
+            pass
+    if len(issues) == 1:
+        return issues.pop()
+    if issues:
+        return "、".join(sorted(issues))
+    return issue_of()
 
 
 def archive_issue(account=None, issue: str = "") -> bool:
@@ -3270,7 +3754,8 @@ def api_dashboard():
         "account": acc,
         "accounts": accs,
         # 这一屏的数字属于哪一期。账本只装本期，换期时自动归档并清零。
-        "issue": current_issue(acc) if acc else issue_of(),
+        # 全部账号视图取各账号账本的实际期号，不按开奖日历算（否则标签和金额会打架）。
+        "issue": current_issue(acc) if acc else _common_issue(),
         # 开奖时间封盘：过了点不再收注（微信推送会被拒），次日 0 点自动进下一期。
         # seconds_left 让前端不必信任自己电脑的时钟。
         "draw_time": cut["draw_time"],
@@ -3286,7 +3771,7 @@ def api_dashboard():
 
 def _board_issue_options(acc: str = "") -> list:
     """可选账期：本期 + 已归档的前两期。与桌面控制台的 `_issue_choices` 同一口径。"""
-    cur = current_issue(acc) if acc else issue_of()
+    cur = current_issue(acc) if acc else _common_issue()
     opts = [{"label": "本期 %s" % cur, "issue": cur}] if cur else []
     arch = []
     for a in ([acc] if acc else all_accounts()):
@@ -3313,9 +3798,23 @@ def api_board():
     req_acc = (request.args.get("account") or "").strip()
     acc = resolve_account(req_acc) if req_acc else ""
     try:
-        s = msb_view.summary(acc)
+        live = msb_view.summary(acc)
     except Exception as e:
         return jsonify({"ok": False, "error": "读账本失败：%s" % e}), 500
+
+    # 账期：和桌面控制台一样能切「本期 / 前一期 / 前二期」。选的就是本期就读实时账本，
+    # 选的是已归档的期就只读 issues\<期号>.json（归档是只读底稿，不能撤账）。
+    cur_issue = str(live.get("issue") or "")
+    req_issue = (request.args.get("issue") or "").strip()
+    view_issue = req_issue or cur_issue
+    if view_issue and view_issue != cur_issue:
+        try:
+            s = msb_view.issue_summary(acc, view_issue)
+        except Exception:
+            s = live
+    else:
+        s = live
+    history = bool(view_issue and view_issue != cur_issue)
 
     cut = draw_cutoff_state()
     rows = tail_messages(500)
@@ -3337,7 +3836,10 @@ def api_board():
         "ok": True,
         "account": acc,
         "accounts": s.get("accounts") or [],
-        "issue": s.get("issue") or "",
+        # 现在这一屏是哪一期；cur_issue 是「真正的本期」，下拉的默认位要它。
+        "issue": view_issue,
+        "cur_issue": cur_issue,
+        "archived_view": history,
         "zodiac": s.get("zodiac") or "",
         "zodiac_year": s.get("zodiac_year") or "",
         "grand_total": s.get("grand_total") or 0,
@@ -3345,12 +3847,16 @@ def api_board():
         "flat_total": s.get("flat_total") or 0,
         "numbers_with_bets_all": s.get("numbers_with_bets_all") or 0,
         "records_current": s.get("records_current") or 0,
-        "unparsed_current": s.get("unparsed_current") or 0,
+        "unparsed_current": live.get("unparsed_current") or 0,
         "grids": s.get("grids") or {"MO": [], "HK": []},
         "risks": s.get("risks") or {"MO": [], "HK": []},
-        # 平特 / 连肖 / 组合注不落 49 号盘，单列一块（和控制台同一函数算）
-        "zodiac_board": {"MO": zodiac_board(acc, "MO"), "HK": zodiac_board(acc, "HK")},
-        "recent": s.get("recent") or [],
+        # 平特 / 连肖 / 组合注不落 49 号盘，单列一块（和控制台同一函数算）。
+        # 历史期直接用 issue_summary 汇好的（按归档的 items 摊生肖），不能再按当期账本算。
+        "zodiac_board": s.get("zodiac_board") or {"MO": zodiac_board(acc, "MO"),
+                                                  "HK": zodiac_board(acc, "HK")},
+        # 流水始终给本期的：网页的「最近记账」自己按期过滤，历史期的行也在这里面，
+        # 和控制台读同一份 records（控制台也是拿本期 recent 按 issue 筛）。
+        "recent": live.get("recent") or [],
         "unparsed": s.get("unparsed") or [],
         "messages": rows,
         "issue_options": _board_issue_options(acc),
@@ -3581,7 +4087,7 @@ def api_parse():
         # can_llm=False：连模型也不该试（中特/特肖 属真不支持、鼠5尾 歧义、
         # 平特写号码、组合注带「各」/肖数不符、纯寒暄）—— 这些客户已明确"不解析"。
         # 其余规则吃不下的 12/13/14 写法会正常走模型（prompt 里有整笔玩法口径）。
-        "can_llm": not local.get("fatal"),
+        "can_llm": bool(LLM_ENABLED) and not local.get("fatal"),
     })
 
 
@@ -3892,22 +4398,11 @@ def clear_account_dir(account: str) -> dict:
     只把 numbers_state.json 归零是不够的 —— 那样「最近记账」还列着旧账、
     撤销会把号码减成负数、recalc 又会照着流水把账全部加回来。
 
-    清之前把 state/<账号> 整份拷到 backups/<账号>/_clear_<时间戳>/ 留底。
+    不留底（客户 2026-11-21 明确要求）：点了就是删干净，没有 _clear_ 备份目录。
     contacts / targets 不动：清的是账，不是这个号的接入关系。
     """
     acc = resolve_account(account)
     f = account_files(acc)
-    base = STATE_DIR / acc
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_dir = ""
-    try:
-        if base.exists() and any(base.iterdir()):
-            f["backup"].mkdir(parents=True, exist_ok=True)
-            dst = f["backup"] / ("_clear_" + stamp)
-            shutil.copytree(base, dst)
-            backup_dir = str(dst)
-    except Exception as e:
-        logger.warning(f"[{acc}] 清空前留底失败：{e}")
 
     removed = []
     for key, name in (("records", "records.jsonl"),
@@ -3935,8 +4430,8 @@ def clear_account_dir(account: str) -> dict:
     save_data(init_data(), acc, "HK")
     save_others({"total": 0.0, "items": []}, acc)
     save_others({"total": 0.0, "items": []}, acc, "HK")
-    logger.info(f"清空账本：[{acc}] 删了 {len(removed)} 项，留底 {backup_dir or '无'}")
-    return {"account": acc, "backup": backup_dir, "removed": removed}
+    logger.info(f"清空账本：[{acc}] 删了 {len(removed)} 项（未留底）")
+    return {"account": acc, "backup": "", "removed": removed}
 
 
 @app.route("/reset", methods=["POST"])
@@ -4011,19 +4506,19 @@ def route_logs():
 
 # ======================== 定时任务 ========================
 
-def daily_backup_worker():
+def maintenance_worker():
+    """每小时清一趟（2026-11-21 客户要求）。
+
+    以前这趟挂在"每天 0 点"上：机器不常开、零点没在跑，整趟就跳过，
+    结果流水、日志一直不清。现在改成按小时，开机那一刻先补跑一次，之后每小时一次。
+    自动备份不再做了（客户明确说不需要），手动备份按钮照旧。
+    """
     while True:
-        now = datetime.now()
-        nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        time.sleep(max(1, (nxt - now).total_seconds()))
-        backup_data()
-        logger.info("定时备份完成")
         try:
-            n = prune_messages()
-            if n:
-                logger.info(f"已清理超过 {MSG_KEEP_DAYS} 天的消息流水 {n} 个")
+            run_maintenance()
         except Exception as e:
-            logger.warning(f"清理消息流水失败：{e}")
+            logger.warning(f"定时清理失败：{e}")
+        time.sleep(3600)
 
 
 # ======================== 主程序 ========================
@@ -4066,21 +4561,25 @@ def main():
         print(f"👤 当前账号：{CURRENT_ACCOUNT}（已接账号：{', '.join(all_accounts()) or '无'}）")
         print(f"📡 接收地址：http://{HOST}:{PORT}/wx/hook")
         print(f"🖥  网页看板：http://127.0.0.1:{PORT}/")
-        print(f"🤖 模型：{LLM_MODEL}（思考模式 {'开启' if LLM_THINKING else '关闭'}）")
+        print(f"🤖 模型：{LLM_MODEL}（思考模式 {'开启' if LLM_THINKING else '关闭'}）"
+              if LLM_ENABLED else "🤖 模型：未启用（只用本地规则，配置页可勾选开启）")
         print(f"💾 数据目录：{DATA_DIR}")
+        print(f"🗑  数据保留：{KEEP_DAYS} 天（每小时检查；当期账本与配置除外）")
         # 控制台令牌：桌面控制台启动时读这个文件，接口靠它对暗号
         _load_or_create_api_token()
         print("✅ 已就绪，按 Ctrl+C 停止")
 
-        # 启动时先清一次过期流水：机器可能关机好几天，只靠 0 点那一趟会积压
+        # 启动时先跑一趟维护：机器可能关机好几天，等每小时那一趟也行，但开机就对齐更省心
+        # （也顺手把跨了自然日还没翻的期翻掉，不依赖 0 点那一刻开机）
         try:
-            n = prune_messages()
-            if n:
-                print(f"🧹 已清理超过 {MSG_KEEP_DAYS} 天的消息流水 {n} 个")
-        except Exception:
-            pass
+            res = run_maintenance()
+            done = "，".join(f"{k} {v}" for k, v in res.items() if v)
+            if done:
+                print(f"🧹 启动维护（数据保留 {KEEP_DAYS} 天）：{done}")
+        except Exception as e:
+            logger.warning(f"启动维护失败：{e}")
 
-        threading.Thread(target=daily_backup_worker, daemon=True).start()
+        threading.Thread(target=maintenance_worker, daemon=True).start()
         try:
             app.run(host=HOST, port=PORT, debug=False, threaded=True, use_reloader=False)
         except OSError as e:

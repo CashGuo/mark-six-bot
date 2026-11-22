@@ -48,3 +48,10 @@ logs/
 # 操作系统文件
 .DS_Store
 Thumbs.db
+
+# 旧出包备份与本地文件备份（不入库）
+build/out_bak/
+*.bak
+*.bak_*
+build/assets/*.png
+

@@ -20,6 +20,7 @@ import ipaddress
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -159,6 +160,10 @@ class TabBar(tk.Frame):
         lab.place(relx=0.5, rely=0.5, anchor="center")
         for w in (holder, lab):
             w.bind("<Button-1>", lambda _e, i=idx: self.select(i))
+        # 页面常驻、叠在同一块区域里，靠 lift() 决定谁在最上面。
+        # 不用 pack_forget / pack：总览页 470 多个控件，每次切页签都整页
+        # 重新排一遍，Tk 要吃掉 2~6 秒，切个页签就像卡住了。
+        frame.place(in_=self._body, x=0, y=0, relwidth=1, relheight=1)
         self._items.append((holder, lab, frame))
         if self._cur < 0:
             self._cur = idx
@@ -184,10 +189,17 @@ class TabBar(tk.Frame):
         self._cur = idx
         self._apply()
         if self._cb:
-            try:
-                self._cb()
-            except Exception:
-                pass
+            # 先把页签切过去的画面画出来，再去拉数据：数据再慢也只是
+            # 内容晚半秒到位，不会让人以为点了没反应。
+            self.after_idle(self._fire)
+
+    def _fire(self):
+        if not self._cb:
+            return
+        try:
+            self._cb()
+        except Exception:
+            pass
 
     def _apply(self):
         for i, (holder, lab, frame) in enumerate(self._items):
@@ -197,9 +209,7 @@ class TabBar(tk.Frame):
                           fg=self.ON_FG if on else self.OFF_FG,
                           font=FONT_B if on else FONT)
             if on:
-                frame.pack(in_=self._body, fill="both", expand=True)
-            else:
-                frame.pack_forget()
+                frame.lift()
 
     def on_change(self, func):
         """页签切换回调（代替 ttk 的 <<NotebookTabChanged>>）。"""
@@ -219,8 +229,17 @@ DEFAULTS = {
     "llm_model": "qwen3.8-flash",
     "llm_thinking": 0,
     "llm_timeout": 60,
+    # 2026-11-21 客户要求：大模型总开关，默认不启用（只用本地规则）。
+    # 启用后 API Key / 接口地址 / 模型名 三项都必须填，保存时当场校验。
+    "llm_enabled": 0,
     "draw_time": "21:30",
     "contacts_interval_sec": 21600,
+    # 数据保留天数（2026-11-21 客户要求）：消息流水、运行日志、控制台日志、备份、
+    # 归档旧期次统一按它清理，服务端每小时检查一次；账本当期与记账流水不在此列。
+    "keep_days": 7,
+    # 2026-11-20 客户要求：打开面板就自动起服务；只有他自己点过「停止服务」
+    # 才改成 0，下次启动就不自动起了。点「启动服务」会再改回 1。
+    "auto_start_service": 1,
 }
 
 
@@ -285,10 +304,86 @@ def pid_path() -> Path:
     return data_dir() / ".server_gui.pid"
 
 
-def health(port: int, timeout: float = 2.0):
+def kill_port_owner(port: int) -> int:
+    """结束正在监听该端口的进程，返回被杀的 pid（0 = 没找到）。
+
+    onefile 打包的 exe 会先解包、再起一个子进程真正跑服务：
+    只按 .server_gui.pid 杀父进程，端口还占着、采集端照样能推进来。
+    客户会以为「停了」，其实还在收注 —— 所以停止必须按端口再补一刀。
+    """
     try:
-        with urllib.request.urlopen("http://127.0.0.1:%d/health" % int(port),
-                                    timeout=timeout) as r:
+        import ctypes
+        from ctypes import wintypes
+
+        class ROW(ctypes.Structure):
+            _fields_ = [("state", wintypes.DWORD), ("laddr", wintypes.DWORD),
+                        ("lport", wintypes.DWORD), ("raddr", wintypes.DWORD),
+                        ("rport", wintypes.DWORD), ("opid", wintypes.DWORD)]
+
+        iphlp = ctypes.WinDLL("iphlpapi")
+        size = wintypes.DWORD(0)
+        iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, 5, 0)
+        if size.value <= 0:
+            return 0
+        buf = ctypes.create_string_buffer(size.value)
+        if iphlp.GetExtendedTcpTable(buf, ctypes.byref(size), False, 2, 5, 0) != 0:
+            return 0
+        n = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+        if n <= 0:
+            return 0
+        rows = ctypes.cast(ctypes.byref(buf, 4), ctypes.POINTER(ROW * n)).contents
+
+        p16 = port & 0xFFFF
+        swapped = ((p16 >> 8) | ((p16 & 0xFF) << 8)) & 0xFFFF
+        for r in rows:
+            if int(r.state) != 2:            # 只认 LISTEN
+                continue
+            lp = int(r.lport) & 0xFFFF
+            if lp != p16 and lp != swapped:
+                continue
+            pid = int(r.opid)
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            h = k32.OpenProcess(0x0001, False, pid)     # PROCESS_TERMINATE
+            if h:
+                k32.TerminateProcess(h, 0)
+                k32.CloseHandle(h)
+                return pid
+        return 0
+    except Exception:
+        return 0
+
+
+# 本机接口一律直连。机器上开着代理（梯子）时，连 127.0.0.1 也会被塞进代理
+# 绕一圈，一次要搭 2 秒；页签刷新、状态轮询都用它，几次叠加界面就整片冻住。
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def health(port: int, timeout: float = 0.8):
+    """问一句「端口上有人应答吗」。
+
+    先用 socket 快探一下端口在不在监听：没监听就 0.3 秒内返回 False。
+    不能直接 urlopen —— 机器上开着代理（梯子）时，连 127.0.0.1 也会被
+    塞进代理走一圈，要卡 2 秒才失败；界面每秒查一次、启动时每 0.7 秒查
+    一次，几次叠加就把主线程占死，点「启动服务」后窗口整片冻住，
+    看着就像卡死了（这是用户反复连点的真正原因）。
+    """
+    port = int(port)
+    probe = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout(0.15)
+        probe.connect(("127.0.0.1", port))
+    except OSError:
+        return False, "未监听"
+    finally:
+        if probe is not None:
+            try:
+                probe.close()
+            except Exception:
+                pass
+    try:
+        # 空 ProxyHandler：即使设了 http_proxy 也保证直连本机
+        with _LOCAL_OPENER.open("http://127.0.0.1:%d/health" % port, timeout=timeout) as r:
             body = r.read(64).decode("utf-8", "ignore")
             return (int(getattr(r, "status", 200)) == 200 and body.strip().startswith("OK"),
                     "HTTP %s" % getattr(r, "status", "?"))
@@ -366,7 +461,7 @@ def api_post(path: str, payload=None, port: int = 8899) -> dict:
     headers = api_headers(headers)
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with _LOCAL_OPENER.open(req, timeout=10) as r:
             return json.loads(r.read().decode("utf-8", "ignore") or "{}")
     except urllib.error.HTTPError as e:
         try:
@@ -382,7 +477,7 @@ def api_get(path: str, port: int = 8899) -> dict:
     url = "http://127.0.0.1:%d%s" % (int(port), path)
     req = urllib.request.Request(url, headers=api_headers(), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with _LOCAL_OPENER.open(req, timeout=10) as r:
             return json.loads(r.read().decode("utf-8", "ignore") or "{}")
     except urllib.error.HTTPError as e:
         try:
@@ -402,6 +497,48 @@ def fmt_money(v) -> str:
     if abs(n - round(n)) < 1e-9:
         return "%.0f" % n
     return ("%.2f" % n).rstrip("0").rstrip(".")
+
+
+def parse_hhmm(raw, default=(21, 30)):
+    """「21:30」→ (21, 30)。写错了就退回默认，不抛异常。"""
+    try:
+        h, m = str(raw or "").strip().split(":")[:2]
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+    except Exception:
+        pass
+    return default
+
+
+def cut_state(issue, draw) -> dict:
+    """这一期还收不收注 —— 与服务端 main.draw_cutoff_state 同一口径。
+
+    封盘时刻是「本期开奖日当天的 HH:MM」：过了点就算封盘（微信注会被拒，
+    只回一句说明），次日 0 点换期才重新收。所以周日/周一下午看到的是
+    周二那期的倒计时，不是「今天 21:30」。
+    """
+    now = datetime.now()
+    hh, mm = parse_hhmm(draw)
+    try:
+        d = datetime.strptime(str(issue or "").strip(), "%Y-%m-%d")
+    except Exception:
+        d = now
+    close_at = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    return {"closed": now >= close_at,
+            "left": int((close_at - now).total_seconds()),
+            "draw": "%02d:%02d" % (hh, mm)}
+
+
+def fmt_left(sec) -> str:
+    """还剩多久：3 小时 12 分 / 12 分 / 30 秒。"""
+    sec = max(0, int(sec or 0))
+    h, m = sec // 3600, (sec % 3600) // 60
+    if h > 0:
+        return "%d 小时%s" % (h, (" %d 分" % m) if m else "")
+    if m > 0:
+        return "%d 分" % m
+    return "%d 秒" % sec
 
 
 def zx_amt(v) -> str:
@@ -451,6 +588,9 @@ class MainWindow:
         self._grid_rows = {}
         self._risk_sig = {}
         self._rec_sig = None
+        # 顶栏账期："" = 跟随本期；否则是具体期号（前一期/前二期看归档用）
+        self._board_iss = ""
+        self._issue_opts = []
         # 最近记账每一行对应的消息号 / 是否已撤销。撤销按钮靠这两张表定位。
         self._rec_mid = {}
         self._rec_rev = {}
@@ -542,7 +682,6 @@ class MainWindow:
         self.btn_run.pack(side="left", padx=(12, 6), pady=8)
         mkbtn("手工记账", self.open_manual, "#eef7ff", CLR_BLUE2, 9).pack(side="left", padx=6, pady=8)
         mkbtn("文本记账", self.open_quick, "#eef7ff", CLR_BLUE2, 9).pack(side="left", padx=6, pady=8)
-        mkbtn("备份", self.do_backup, "#eef0f3", "#374151", 7).pack(side="left", padx=6, pady=8)
         mkbtn("清空当前账号", self.do_reset, "#fdf4f3", CLR_RED, 13).pack(side="left", padx=6, pady=8)
         mkbtn("打开看板", self.open_dashboard, "#eef0f3", "#374151", 10).pack(side="left", padx=6, pady=8)
         self.v_auto = tk.BooleanVar(value=self._autorun_on())
@@ -583,7 +722,15 @@ class MainWindow:
                 lb.bind("<Button-1>", lambda _e: click())
             setattr(self, attr, lb)
 
-        chip("本期", "lb_issue")
+        # 账期：本期 / 前一期 / 前二期 —— 下拉切着看最近三期的账面，默认本期
+        self.issue_var = tk.StringVar()
+        iwrap = tk.Frame(row, bg=CLR_CARD)
+        iwrap.pack(side="left", padx=(0, 16))
+        tk.Label(iwrap, text="账期", font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED).pack(side="left")
+        self.issue_sel = ttk.Combobox(iwrap, textvariable=self.issue_var, state="readonly",
+                                      width=16, font=FONT_S)
+        self.issue_sel.pack(side="left", padx=(4, 0))
+        self.issue_sel.bind("<<ComboboxSelected>>", self._on_board_issue)
         chip("生肖年", "lb_zyear")
         # 澳门、香港各自的金额钉到各号码盘最后一列底部去了，顶栏只留一个合计
         chip("澳门", "lb_mo", pack=False)
@@ -596,6 +743,9 @@ class MainWindow:
         # 未解析只统计本期：上几期没解析的单已经随期归档，不该混进来。
         # 点这个数字直接跳到「消息」那边看是哪几条，不再单放一个按钮
         chip("本期未解析", "lb_kunp", click=self.goto_unparsed)
+        # 开奖封盘：到点后顶栏直接写「已封盘」。后端过了点就拒收微信注，
+        # 但界面一直没露这个状态，客户看不出「还能不能下」，只能等到被拒才发现。
+        chip("开奖", "lb_cut")
 
         # 按钮留着（别处可能还要它显示数字），只是不占顶栏那一行
         self.btn_unp = tk.Button(row, text="未解析 0", font=FONT_S, bg="#fdf4f3",
@@ -1105,54 +1255,82 @@ class MainWindow:
         # 老配置里那把密钥服务端仍然认（名单为空时的兜底），但界面上不再让人填，
         # 免得两份密钥并存、说不清到底认哪个。
         self.v_port = self._row(g1, "端口", "port",
-                                "默认 8899。改完要停止再启动才生效；采集端的推送地址也要跟着改", 0)
-        tip = tk.Label(g1, text="接几个采集端、各自用哪把密钥、到期时间、IP 限制，都在「白名单」页里管："
-                                "点「新增」会生成 API Key，填到采集端就能推。",
-                       font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left")
-        tip.pack(fill="x", padx=14, pady=(0, 10))
+                                "默认 8899；改完停/启才生效，采集端推送地址同步改", 0)
+        tk.Label(g1, text="多个采集端各自的密钥、到期时间、IP 限制都在「白名单」页管："
+                          "点「新增」生成 API Key，填到采集端就能推。",
+                 font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, anchor="w", justify="left",
+                 wraplength=980).pack(fill="x", padx=14, pady=(2, 8))
 
         g2 = group("大模型（AI 解析）")
+        row = tk.Frame(g2, bg=CLR_BG)
+        row.pack(fill="x", pady=(6, 0), padx=8)
+        tk.Label(row, text="启用", font=FONT, bg=CLR_BG, fg="#374151",
+                 width=12, anchor="w").pack(side="left")
+        self.v_llm_on = tk.BooleanVar(value=bool(int(self.cfg.get("llm_enabled") or 0)))
+        tk.Checkbutton(row, text="规则吃不下的写法交给大模型（不勾就只用本地规则）",
+                       variable=self.v_llm_on, font=FONT_S, bg=CLR_BG, fg="#374151",
+                       activebackground=CLR_BG, selectcolor=CLR_BG,
+                       command=self._toggle_llm_fields).pack(side="left")
+
         self.v_key = self._row(g2, "API Key", "llm_api_key",
-                               "填你自己的大模型 Key（阿里云百炼 / 任意 OpenAI 兼容端点）", 0,
+                               "阿里云百炼或任意 OpenAI 兼容端点的 Key", 0,
                                secret=True)
         self.v_base = self._row(g2, "接口地址", "llm_base_url",
-                                "兼容 OpenAI 协议的 /v1 地址，一般不用改", 1)
+                                "OpenAI 兼容的 /v1 地址，一般不用改", 1)
         self.v_model = self._row(g2, "模型名", "llm_model",
-                                 "默认 qwen3.8-flash；换成别的模型名也行", 2)
+                                 "默认 qwen3.8-flash，也可换别的模型名", 2)
         row = tk.Frame(g2, bg=CLR_BG)
-        row.pack(fill="x", pady=4, padx=8)
+        row.pack(fill="x", pady=(4, 0), padx=8)
         tk.Label(row, text="思考模式", font=FONT, bg=CLR_BG, fg="#374151",
                  width=12, anchor="w").pack(side="left")
         self.v_think = tk.BooleanVar(value=bool(int(self.cfg.get("llm_thinking") or 0)))
-        tk.Checkbutton(row, text="开启（慢但更啰嗦；实测关掉更快更准）", variable=self.v_think,
-                       font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, activebackground=CLR_BG,
-                       selectcolor=CLR_BG).pack(side="left")
+        self.chk_think = tk.Checkbutton(row, text="开启（更慢；实测关掉更快更准）",
+                                        variable=self.v_think, font=FONT_S,
+                                        bg=CLR_BG, fg=CLR_MUTED,
+                                        activebackground=CLR_BG, selectcolor=CLR_BG)
+        self.chk_think.pack(side="left")
+        self._toggle_llm_fields()
 
         g3 = group("收注规则")
         self.v_draw = self._row(g3, "开奖时间", "draw_time",
-                                "过了这个时间本期不再收注（微信推来的注会被拒并回一句说明），"
-                                "次日 0 点自动进入下一期", 0)
-        tk.Label(g3, text="填 HH:MM，例如 21:30。开奖日仍是周二 / 周四 / 周六；"
-                          "手工记账不受这个时间限制（开奖后可以补录）。",
-                 font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left").pack(
-                     fill="x", padx=14, pady=(0, 10))
+                                "HH:MM，如 21:30；到点停收微信注（会回一句说明），"
+                                "次日 0 点才进下一期；手工记账不限", 0)
+
+        g3b = group("数据清理")
+        self.v_keep = self._row(g3b, "保留天数", "keep_days", "", 0)
 
         g4 = group("解析规则（叫法）")
         # 生效路径必须看得见：改了 patch\ 里的文件、实际跑的却是 EXE 内置那份，
-        # 是最常见的一类"怎么改都不生效"。
-        _st = (patch_loader.STATUS.get("modules") or {}).get("bet_rules") or {}
-        _src = _st.get("source", "builtin")
-        _path = _st.get("path") or ""
+        # 是最常见的一类"怎么改都不生效"。现在分两层，两层都要显示出来。
+        _info = (patch_loader.STATUS.get("layers") or {}).get("bet_rules") or {}
+        _u = _info.get("user") or {}
+        _b = _info.get("builtin") or {}
+        _ok_u = bool(_u.get("path")) and not _u.get("error")
+        _ok_b = bool(_b.get("path")) and not _b.get("error")
+        if _ok_u and _ok_b:
+            _txt, _clr = "用户规则 + 内置规则（用户优先）", CLR_OK
+        elif _ok_u:
+            _txt, _clr = "只有用户规则（内置层没加载上）", "#b26a00"
+        elif _ok_b:
+            _txt, _clr = "只有内置规则（用户规则没找到）", CLR_MUTED
+        else:
+            _txt, _clr = "规则没加载上", CLR_BAD
         row = tk.Frame(g4, bg=CLR_BG)
         row.pack(fill="x", pady=(4, 0), padx=8)
         tk.Label(row, text="规则来源", font=FONT, bg=CLR_BG, fg="#374151",
                  width=12, anchor="w").pack(side="left")
-        tk.Label(row, text=("外部文件" if _src == "external" else "EXE 内置"),
-                 font=FONT_B, bg=CLR_BG,
-                 fg=(CLR_OK if _src == "external" else CLR_MUTED)).pack(side="left")
-        if _path:
-            tk.Label(row, text=_path, font=FONT_S, bg=CLR_BG, fg="#1f2937",
-                     anchor="w", justify="left", wraplength=400).pack(side="left", padx=(8, 0))
+        tk.Label(row, text=_txt, font=FONT_B, bg=CLR_BG, fg=_clr).pack(side="left")
+
+        for _lab, _d in (("用户规则", _u), ("内置规则", _b)):
+            if not _d.get("path"):
+                continue
+            _r = tk.Frame(g4, bg=CLR_BG)
+            _r.pack(fill="x", padx=8)
+            tk.Label(_r, text=_lab, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED,
+                     width=8, anchor="w").pack(side="left")
+            tk.Label(_r, text=(_d["path"] if not _d.get("error") else "加载失败：%s" % _d["error"]),
+                     font=FONT_S, bg=CLR_BG, fg=("#1f2937" if not _d.get("error") else CLR_BAD),
+                     anchor="w", justify="left", wraplength=620).pack(side="left")
 
         _patch_dir = Path(patch_loader.STATUS.get("seed_dir") or (_paths.HOME_DIR / "patch"))
 
@@ -1187,14 +1365,6 @@ class MainWindow:
         tk.Button(row2, text="恢复出厂规则", font=FONT_S, bg="#eef0f3", fg="#374151",
                   relief="flat", bd=0, cursor="hand2", command=_restore_rules
                   ).pack(side="left", padx=(6, 0))
-
-        _note = "加叫法改 bet_rules.py 里的 PLAYS 就行；改完「停止 → 启动」生效，不用重编。"
-        if "bet_rules.py" in (patch_loader.STATUS.get("kept") or []):
-            _note = "这两个文件你改过，没有随新版本更新；要用新版规则点「恢复出厂规则」。"
-        elif patch_loader.STATUS.get("updated"):
-            _note = "规则已随新版本自动更新（旧版备份在同目录 .bak-日期）。"
-        tk.Label(g4, text=_note, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED, justify="left",
-                 wraplength=520, anchor="w").pack(fill="x", padx=14, pady=(4, 6))
 
         # 改完先检查，再决定要不要重启 —— 写坏的文件重启后会静默回退内置，
         # 客户会以为"改了没生效"，所以这里必须能在不重启的前提下先拦住。
@@ -1244,10 +1414,13 @@ class MainWindow:
                   ).pack(anchor="w", pady=(10, 0))
 
     def _row(self, parent, label, key, hint, idx, secret=False):
+        # 行内用 grid（标签 / 输入框 / 按钮三列），输入框那一列可伸缩。
+        # 用 pack 时 expand 的输入框会把右侧「显示」按钮挤出可视区。
         row = tk.Frame(parent, bg=CLR_BG)
         row.pack(fill="x", pady=(4, 0), padx=8)
+        row.columnconfigure(1, weight=1)
         tk.Label(row, text=label, font=FONT, bg=CLR_BG, fg="#374151",
-                 width=12, anchor="w").pack(side="left")
+                 width=12, anchor="w").grid(row=0, column=0, sticky="w")
         var = tk.StringVar(value=str(self.cfg.get(key, DEFAULTS.get(key, "")) or ""))
         ent = tk.Entry(row, textvariable=var, font=FONT, relief="solid", bd=1,
                        highlightthickness=0, width=56)
@@ -1264,19 +1437,50 @@ class MainWindow:
                 entry.configure(show="*")
                 button.configure(text="显示")
 
-        ent.pack(side="left", fill="x", expand=True)
+        ent.grid(row=0, column=1, sticky="ew")
         var._entry = ent
         if secret:
-            btn = tk.Button(row, text="显示", font=FONT_S, relief="flat", bd=0,
-                            bg=CLR_BG, fg=CLR_BLUE, cursor="hand2", width=5)
-            btn.configure(command=lambda e=ent, b=btn: _toggle(e, b))
-            btn.pack(side="left", padx=(6, 0))
+            # 用 Label 当按钮：浅底上 tk.Button 的蓝字实测画不出来（flat+bd=0 时
+            # 被系统主题吃掉），Label 的颜色一定生效，点一下一样能切换。
+            btn = tk.Label(row, text="显示", font=FONT_S, bg=CLR_BG, fg=CLR_BLUE,
+                           cursor="hand2", width=5, anchor="center")
+            btn.bind("<Button-1>", lambda e, en=ent, b=btn: _toggle(en, b))
+            btn.grid(row=0, column=2, sticky="e", padx=(6, 0))
+            var._btn = btn
         if hint:
             h = tk.Frame(parent, bg=CLR_BG)
-            h.pack(fill="x", padx=8)
+            h.pack(fill="x", padx=8, pady=(1, 0))
             tk.Label(h, text=hint, font=FONT_S, bg=CLR_BG, fg=CLR_MUTED,
-                     anchor="w", justify="left").pack(side="left", padx=(100, 0))
+                     anchor="w", justify="left", wraplength=980).pack(
+                         side="left", padx=(100, 0))
         return var
+
+    def _toggle_llm_fields(self):
+        """大模型没启用时把三行输入置灰，免得填了一整串却根本没生效。"""
+        on = bool(self.v_llm_on.get())
+        for var in (getattr(self, "v_key", None), getattr(self, "v_base", None),
+                    getattr(self, "v_model", None)):
+            ent = getattr(var, "_entry", None) if var is not None else None
+            if ent is not None:
+                try:
+                    ent.configure(state="normal" if on else "disabled",
+                                  disabledbackground="#f3f4f6")
+                except Exception:
+                    pass
+            btn = getattr(var, "_btn", None) if var is not None else None
+            if btn is not None:
+                try:
+                    # 「显示/隐藏」不给禁用：即使输入框只读，也让人能核对打码的值；
+                    # 而且禁用后这颗按钮在浅底上几乎看不见。
+                    btn.configure(state="normal")
+                except Exception:
+                    pass
+        chk = getattr(self, "chk_think", None)
+        if chk is not None:
+            try:
+                chk.configure(state="normal" if on else "disabled")
+            except Exception:
+                pass
 
     # ---------- 日志 ----------
     def _build_tab_log(self, tab):
@@ -1369,7 +1573,7 @@ class MainWindow:
             req = urllib.request.Request(
                 "http://127.0.0.1:%d/api/messages?limit=200" % port,
                 headers=api_headers())
-            with urllib.request.urlopen(req, timeout=3) as r:
+            with _LOCAL_OPENER.open(req, timeout=3) as r:
                 j = json.loads(r.read().decode("utf-8", "replace"))
             rows = j.get("messages") or []
             meta = j
@@ -1447,7 +1651,8 @@ class MainWindow:
             self.lb_msg_sub.configure(
                 text="%s 这一期还没有消息。采集端推送一条，这里就会立刻出现。"
                      "（只留 %s 天，过期自动删）" % (sel or "所选账期",
-                                                   meta.get("keep_days") or 7),
+                                                   meta.get("keep_days")
+                                                   or self.cfg.get("keep_days") or 7),
                 fg=CLR_MUTED)
 
     def _on_log_scope(self, _evt=None):
@@ -1509,6 +1714,9 @@ class MainWindow:
     # ---------- 最近记账：单笔撤销 ----------
     def _on_rec_click(self, event):
         """点「操作」那一格就撤这一笔；点别的列只是普通选中，什么都不做。"""
+        if getattr(self, "_view_history", False):
+            self._toast("看的是历史期，归档账目不能撤")
+            return
         tv = getattr(self, "tv_rec", None)
         if tv is None:
             return
@@ -1547,7 +1755,7 @@ class MainWindow:
                 "http://127.0.0.1:%d/api/record?msg_id=%s"
                 % (port, urllib.parse.quote(mid, safe="")),
                 headers=api_headers())
-            with urllib.request.urlopen(req, timeout=5) as r:
+            with _LOCAL_OPENER.open(req, timeout=5) as r:
                 j = json.loads(r.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError:
             messagebox.showwarning("撤销这笔账", "找不到这笔账（可能流水已经清理）",
@@ -1722,7 +1930,7 @@ class MainWindow:
         try:
             req = urllib.request.Request(
                 "http://127.0.0.1:%d/api/clients" % port, headers=api_headers())
-            with urllib.request.urlopen(req, timeout=2) as r:
+            with _LOCAL_OPENER.open(req, timeout=2) as r:
                 j = json.loads(r.read().decode("utf-8", "replace"))
                 for c in (j.get("clients") or []):
                     last[c.get("wechat_id")] = c.get("last_push") or ""
@@ -2039,6 +2247,7 @@ class MainWindow:
     # ---- 状态刷新 ----
     def _on_tab(self, event=None):
         idx = self.nb.current()
+        self._last_switch_at = time.time()   # 给 _loop 用：刚切过来的页签别再刷一遍
         if idx == 0:
             self.refresh_overview()
         elif idx == 2:
@@ -2049,6 +2258,8 @@ class MainWindow:
     def _on_acc_change(self, event=None):
         v = (self.acc_var.get() or "").strip()
         self.acc = "" if v.startswith("全部账号") else v
+        # 账期不跟着账号走：换了账号还是看同一期，那个账号没这期就显示 0。
+        self._rec_sig = None
         self.refresh_overview()
 
     def _sync_accounts(self):
@@ -2070,17 +2281,51 @@ class MainWindow:
 
     def refresh_overview(self):
         try:
-            s = msb_view.summary(self.acc)
+            live = msb_view.summary(self.acc)
         except Exception as e:
             self.lb_grand.configure(text="—")
             self._toast("读数据出错：%r" % (e,))
             return
         self._sync_accounts()
+        # 账期：本期 / 前一期 / 前二期。_board_iss 是唯一真源（"" = 跟随本期）；
+        # 顶栏下拉和「最近记账」上面的账期下拉对齐，切哪个另一个跟着变。
+        picks = self._issue_choices(live)
+        self._issue_opts = picks
+        labels = tuple(p[0] for p in picks)
+        want = getattr(self, "_board_iss", "")
+        idx = 0
+        if want:
+            hit = next((i for i, p in enumerate(picks) if p[1] == want), None)
+            if hit is None:
+                self._board_iss = ""   # 这一期的归档已经不在了（被清理），回本期
+            else:
+                idx = hit
+        if idx < 0 or idx >= len(picks):
+            idx = 0
+        for box in (self.issue_sel, self.rec_scope):
+            try:
+                if tuple(box["values"] or ()) != labels:
+                    box["values"] = labels
+                if box.current() != idx:
+                    box.current(idx)
+            except Exception:
+                pass
+        cur_issue = str(live.get("issue") or "")
+        sel = picks[idx][1] if picks else cur_issue
+        # 看的是历史期就只有账，不能撤：归档文件是只读底稿
+        self._view_history = bool(sel and sel != cur_issue)
+        # 选中当期就读实时账本，选中历史期才去读 issues/<期号>.json
+        if sel and sel != cur_issue:
+            try:
+                s = msb_view.issue_summary(self.acc, sel)
+            except Exception:
+                s = live
+        else:
+            s = live
         self.lb_grand.configure(text=fmt_money(s["grand_total"]))
         banks = s.get("markets") or {}
         self.lb_mo.configure(text=fmt_money((banks.get("MO") or {}).get("total") or 0))
         self.lb_hk.configure(text=fmt_money((banks.get("HK") or {}).get("total") or 0))
-        self.lb_issue.configure(text="%s 期" % s.get("issue", "—"))
         self.lb_zyear.configure(text="%s年 · %s" % (s["zodiac_year"], s["zodiac"]))
         self.lb_kbets.configure(text=str(s.get("numbers_with_bets_all", s["numbers_with_bets"])))
         # 顶栏只剩一个「号码盘 = 澳 + 港」，两本各自的金额在盘面右下角。
@@ -2090,20 +2335,21 @@ class MainWindow:
             ((banks.get("ALL") or {}).get("board")) or 0))
         self.lb_flat.configure(text=fmt_money(s.get("flat_total") or 0))
         self.lb_krec.configure(text=str(s.get("records_current") or 0))
-        cur_issue = str(s.get("issue") or "")
-
-        # 期别选择：本期 / 前一期 / 前二期，都是具体日期，选中哪期就看哪期
-        picks = self._issue_choices(s)
-        self._issue_opts = picks
-        labels = tuple(p[0] for p in picks)
-        if tuple(self.rec_scope["values"] or ()) != labels:
-            self.rec_scope["values"] = labels
-            self.rec_scope.current(0)
-        idx = self.rec_scope.current()
-        if idx < 0 or idx >= len(picks):
-            idx = 0
-            self.rec_scope.current(0)
-        sel = picks[idx][1] if picks else cur_issue
+        # 封盘：不管在看哪一期，都告诉你「现在这期还收不收注」。
+        # 后端过了开奖时刻就拒收（只回一句说明），顶栏以前不露这个状态，
+        # 客户只能等注被拒了才知道已经封盘。口径同 main.draw_cutoff_state。
+        try:
+            cfg_now = getattr(self, "cfg", None) or read_cfg()
+            cut = cut_state(live.get("issue"), (cfg_now or {}).get("draw_time"))
+        except Exception:
+            cut = cut_state(live.get("issue"), "21:30")
+        if cut["closed"]:
+            self.lb_cut.configure(text="已封盘（%s 开奖）" % cut["draw"],
+                                  fg=CLR_RED)
+        else:
+            self.lb_cut.configure(text="%s 截止（剩 %s）"
+                                  % (cut["draw"], fmt_left(cut["left"])),
+                                  fg="#111827")
 
         # 消息流水是「消息」页和这里共用的事实源，两边数字才对得上。
         # 拉不到（服务端没起）就退回本地文件口径，不让界面空着。
@@ -2118,8 +2364,8 @@ class MainWindow:
                        and str(m.get("chat") or "") in ("规则测试", "自检"))
         unp_n = sum(1 for m in mine if str(m.get("result") or "") == "未解析")
         if not self._msg_rows:
-            unp_n = (int(s.get("unparsed_current") or 0) if sel == cur_issue else
-                     sum(1 for x in s["unparsed"]
+            unp_n = (int(live.get("unparsed_current") or 0) if sel == cur_issue else
+                     sum(1 for x in live["unparsed"]
                          if str(x.get("issue") or "") == sel))
         self.lb_kunp.configure(text=str(unp_n))
         self.btn_unp.configure(text="未解析 %d" % unp_n)
@@ -2129,11 +2375,14 @@ class MainWindow:
         self._render_grid("MO", grids.get("MO") or [])
         self._render_grid("HK", grids.get("HK") or [])
 
-        # 生肖金额表 + 组合注：不落号码盘的钱，按生肖摊开看
-        try:
-            boards = {mk: msb_view.zodiac_board(self.acc, mk) for mk in ("MO", "HK")}
-        except Exception:
-            boards = {}
+        # 生肖金额表 + 组合注：不落号码盘的钱，按生肖摊开看。
+        # 历史期用 issue_summary 里已经算好的 boards，别再按当期账本算一遍。
+        boards = s.get("zodiac_board") or {}
+        if not boards:
+            try:
+                boards = {mk: msb_view.zodiac_board(self.acc, mk) for mk in ("MO", "HK")}
+            except Exception:
+                boards = {}
         self._render_zxbar(boards)
 
         # 两本风险榜：澳门在上、香港在下，有金额的号全部列出
@@ -2158,7 +2407,7 @@ class MainWindow:
 
         # 最近记账：只显示选中的那一期。手工记账不在消息流水里（消息页看不到），
         # 所以提示里把两边条数摆出来：消息记账 N 笔 / 账目 M 笔（含手工 K 笔）。
-        all_rec = s["recent"]
+        all_rec = live["recent"]
         rec_rows = [x for x in all_rec if str(x.get("issue") or "") == sel]
         manual_n = sum(1 for x in rec_rows
                        if str(x.get("sender") or "") == "manual"
@@ -2191,7 +2440,7 @@ class MainWindow:
                     str(x.get("text") or "")[:70],
                     x.get("numbers") or 0,
                     fmt_money(x.get("total")),
-                    "已撤销" if rev else "撤销",
+                    "—" if self._view_history else ("已撤销" if rev else "撤销"),
                 ), tags=("who",) if not rev else ("who", "rev"))
                 self._rec_mid[iid] = str(x.get("msg_id") or "")
                 self._rec_rev[iid] = rev
@@ -2203,7 +2452,7 @@ class MainWindow:
             req = urllib.request.Request(
                 "http://127.0.0.1:%d/api/messages?limit=%d" % (port, limit),
                 headers=api_headers())
-            with urllib.request.urlopen(req, timeout=3) as r:
+            with _LOCAL_OPENER.open(req, timeout=3) as r:
                 j = json.loads(r.read().decode("utf-8", "replace"))
             return j.get("messages") or []
         except Exception:
@@ -2219,9 +2468,9 @@ class MainWindow:
         opts = [("本期 %s" % cur, cur)] if cur else []
         arch = []
         try:
-            # 合计视图下 self.acc 是空的，得把所有账号的归档期并起来
-            accs = [self.acc] if self.acc else msb_view.all_accounts()
-            for a in accs:
+            # 可选账期是全套账号的并集，和当前选中的账号无关：这样切账号不会
+            # 把已经选好的期号弄丢；某个账号没有这一期，就按 0 显示。
+            for a in msb_view.all_accounts():
                 arch += [p.stem for p in msb_view.issue_files(a)]
         except Exception:
             arch = []
@@ -2231,8 +2480,25 @@ class MainWindow:
             opts.append(("%s %s" % ("前一期" if i == 0 else "前二期", iss), iss))
         return opts
 
+    def _on_board_issue(self, _evt=None):
+        """顶栏切账期：只记期号，重画交给 refresh_overview（两个账期下拉一起对齐）。"""
+        opts = getattr(self, "_issue_opts", []) or []
+        try:
+            i = self.issue_sel.current()
+        except Exception:
+            i = 0
+        self._board_iss = opts[i][1] if 0 <= i < len(opts) else ""
+        self._rec_sig = None
+        self.refresh_overview()
+
     def _on_rec_scope(self, _evt=None):
         """切账期：指纹清掉，强制按新期重画一次。"""
+        opts = getattr(self, "_issue_opts", []) or []
+        try:
+            i = self.rec_scope.current()
+        except Exception:
+            i = 0
+        self._board_iss = opts[i][1] if 0 <= i < len(opts) else ""
         self._rec_sig = None
         self.refresh_overview()
         self.refresh_log(force=True)
@@ -2256,16 +2522,80 @@ class MainWindow:
             pass
 
     def _paint_starting(self):
-        """点完「启动服务」到端口响应之间：按钮明说在启动，别让人以为没点上。"""
+        """点完「启动服务」到端口响应之间：按钮明说在启动，别让人以为没点上。
+
+        2026-11-20：启动要好几秒，客户会以为卡住了一直点。所以按钮置灰 +
+        旁边弹一个「正在启动」的小窗，带已等待秒数，数字在涨就知道没死。
+        """
         b = getattr(self, "btn_run", None)
         if b is None:
             return
         try:
             b.configure(text="启动中…", bg="#f2f4f7", fg="#78818f",
                         activebackground="#eceff3", activeforeground="#78818f",
-                        state="normal")
+                        state="disabled")     # 置灰：防止连点堆进程
         except Exception:
             pass
+
+    # ---- 启动 / 停止期间的提示窗（客户看着数字涨，就不会以为卡死） ----
+    def _busy_show(self, what):
+        """在窗口中间浮一块小提示，标题形如「正在启动服务  已等待 3 秒」。"""
+        self._busy_hide()
+        try:
+            w = tk.Toplevel(self.root)
+            w.overrideredirect(True)
+            try:
+                w.attributes("-topmost", True)
+            except Exception:
+                pass
+            w.configure(bg="#2f3542")      # 1px 深色边框，白底浮在窗口上更清楚
+            box = tk.Frame(w, bg="#ffffff", padx=24, pady=16)
+            box.pack(padx=1, pady=1)
+            self._busy_lbl = tk.Label(box, text=what, font=FONT_B,
+                                      bg="#ffffff", fg="#111827")
+            self._busy_lbl.pack(anchor="w")
+            tk.Label(box, text="端口就绪通常要 3~10 秒，完成后这个提示会自动关掉",
+                     font=FONT_S, bg="#ffffff", fg="#6b7280").pack(
+                         anchor="w", pady=(6, 0))
+            w.update_idletasks()
+            bw, bh = w.winfo_width(), w.winfo_height()
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = max(self.root.winfo_width(), bw), max(self.root.winfo_height(), bh)
+            w.geometry("+%d+%d" % (rx + (rw - bw) // 2, ry + (rh - bh) // 2))
+            self._busy_win = w
+            self._busy_what = what
+            self._busy_t0 = time.time()      # 秒数按真实流逝时间算，别让数字比实际慢
+            self._busy_job = self.root.after(400, self._busy_pump)
+        except Exception:
+            self._busy_win = None
+
+    def _busy_pump(self):
+        w = getattr(self, "_busy_win", None)
+        if w is None:
+            return
+        self._busy_tick = getattr(self, "_busy_tick", 0) + 1
+        secs = int(max(0.0, time.time() - getattr(self, "_busy_t0", time.time())))
+        try:
+            self._busy_lbl.configure(text="%s  已等待 %d 秒" % (self._busy_what, secs))
+        except Exception:
+            pass
+        self._busy_job = self.root.after(400, self._busy_pump)
+
+    def _busy_hide(self):
+        job = getattr(self, "_busy_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+            self._busy_job = None
+        w = getattr(self, "_busy_win", None)
+        if w is not None:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+            self._busy_win = None
 
     def _refresh_status(self):
         try:
@@ -2311,14 +2641,17 @@ class MainWindow:
         try:
             self._refresh_status()
             # 只在当前页自动刷，别把别页的选中/滚动冲掉
-            try:
-                cur = self.nb.current()
-                if cur == 0:
-                    self.refresh_overview()
-                elif cur == 3:
-                    self.refresh_log()
-            except Exception:
-                pass
+            # 刚切过来的页签已经刷过一次了，这里隔开 1.2 秒再刷：否则
+            # 切页签的刷新和 5 秒定时刷新叠在一起，会突然卡一下
+            if time.time() - getattr(self, "_last_switch_at", 0.0) > 1.2:
+                try:
+                    cur = self.nb.current()
+                    if cur == 0:
+                        self.refresh_overview()
+                    elif cur == 3:
+                        self.refresh_log()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2411,6 +2744,30 @@ class MainWindow:
                 "开奖时间设成 %s，本期的注在上午就会停止接收。\n确定要这样吗？" % draw):
             return
         self.v_draw.set(draw)
+
+        # 保留天数：1~3650，填错当场拦下。存进去一个怪值，清理规则会静默失效，
+        # 客户看到的是"设了 7 天却一直不删"，比报错难查得多。
+        try:
+            keep = int(float(str(self.v_keep.get() or 7).strip()))
+        except Exception:
+            keep = -1
+        if not (1 <= keep <= 3650):
+            messagebox.showerror("保留天数填错了",
+                                 "要填 1~3650 之间的整数天数（默认 7）。\n现在填的是：%s"
+                                 % self.v_keep.get())
+            return
+        self.v_keep.set(str(keep))
+        # 大模型：勾了启用就必须三项齐全 —— 少一样就是"开了却不解析"，
+        # 现场只看到一堆未解析，比保存时直接拦下难查得多。
+        if self.v_llm_on.get():
+            _miss = [n for n, v in (("API Key", self.v_key), ("接口地址", self.v_base),
+                                    ("模型名", self.v_model)) if not v.get().strip()]
+            if _miss:
+                messagebox.showerror("大模型没填全",
+                                     "已勾选启用大模型，这三项都要填。\n\n缺：%s\n\n"
+                                     "要么补齐，要么把「启用」取消掉再保存。"
+                                     % "、".join(_miss))
+                return
         # wx_push_secret / wx_account_secrets 都不在这里改：验签已经全交给「白名单」页，
         # 原值原样写回，免得老配置被一次保存就清空（服务端仍认这两个字段做兜底）。
         old = read_cfg()
@@ -2422,7 +2779,9 @@ class MainWindow:
             "llm_base_url": self.v_base.get().strip(),
             "llm_model": self.v_model.get().strip(),
             "llm_thinking": 1 if self.v_think.get() else 0,
+            "llm_enabled": 1 if self.v_llm_on.get() else 0,
             "draw_time": draw,
+            "keep_days": keep,
         })
         self.cfg = read_cfg()
         self._toast("配置已保存（正在跑的服务要停止再启动才生效）")
@@ -2440,18 +2799,33 @@ class MainWindow:
         else:
             self.start_server()
 
-    def start_server(self):
+    def _set_auto_start(self, on):
+        """记住「下次打开面板要不要自动起服务」：点过停止就记 0，点过启动记 1。"""
+        try:
+            write_cfg({"auto_start_service": 1 if on else 0})
+            self.cfg = read_cfg()
+        except Exception:
+            pass
+
+    def start_server(self, auto=False):
+        """auto=True 是「面板一打开就自动起」：缺配置 / 已在跑 / 拉不起来，
+        都只改状态栏，不弹对话框打扰正在干活的人。"""
         port = int(self.v_port.get() or 8899)
         if health(port)[0]:
-            messagebox.showinfo("已经在跑", "服务端已经在 %d 端口运行了，不用重复启动。" % port)
+            if not auto:
+                messagebox.showinfo("已经在跑", "服务端已经在 %d 端口运行了，不用重复启动。" % port)
             return
         pid = running_pid()
         if pid and _pid_alive(pid):
-            messagebox.showinfo("正在启动", "已经有一个启动中的进程（PID %d），等几秒再看。" % pid)
+            if not auto:
+                messagebox.showinfo("正在启动", "已经有一个启动中的进程（PID %d），等几秒再看。" % pid)
             return
         missing = []
-        if not self.v_key.get().strip():
-            missing.append("大模型 API Key")
+        if self.v_llm_on.get():
+            _miss = [n for n, v in (("API Key", self.v_key), ("接口地址", self.v_base),
+                                    ("模型名", self.v_model)) if not v.get().strip()]
+            if _miss:
+                missing.append("已启用大模型，但没填 " + "、".join(_miss))
         # 一条能推的客户端都没有 → 起了也收不到注，所以直接拦住，
         # 把"去白名单新增"摆在面前（文案别指向早已删掉的「配置页推送密钥」）。
         # 老配置里若还留着兜底密钥，就按兼容模式放行。
@@ -2460,9 +2834,12 @@ class MainWindow:
             missing.append("白名单里还没有启用采集端 —— 去「白名单」页点「新增」生成一条"
                            "（微信号填采集端顶部那个号，采集端那格右边可复制）")
         if missing:
-            messagebox.showerror("配置还没填",
-                                 "缺这些必填项，服务起不来：\n\n  · " + "\n  · ".join(missing) +
-                                 "\n\n填好后点「保存配置」再启动。")
+            if auto:
+                self._toast("配置没填全，这次没自动启动服务（缺 %s）" % missing[0][:28])
+            else:
+                messagebox.showerror("配置还没填",
+                                     "缺这些必填项，服务起不来：\n\n  · " + "\n  · ".join(missing) +
+                                     "\n\n填好后点「保存配置」再启动。")
             return
 
         cmd = self_cmd() + ["--headless", "--quiet"]
@@ -2475,17 +2852,22 @@ class MainWindow:
                                           stdout=out, stderr=subprocess.STDOUT,
                                           creationflags=0x08000000)   # 不弹黑窗
         except Exception as e:
-            messagebox.showerror("启动失败", "拉不起后台服务：\n\n%r" % (e,))
+            if auto:
+                self._toast("自动启动失败：%r" % (e,))
+            else:
+                messagebox.showerror("启动失败", "拉不起后台服务：\n\n%r" % (e,))
             return
         try:
             pid_path().parent.mkdir(parents=True, exist_ok=True)
             pid_path().write_text(str(self._proc.pid), encoding="utf-8")
         except Exception:
             pass
+        if not auto:
+            self._set_auto_start(True)     # 他主动起的，下次打开也自动起
         self._starting = True
         self._paint_starting()
         self._refresh_status()
-        self._toast("正在拉起后台服务…")
+        self._busy_show("正在启动服务…")
         # 400ms 起开始盯，每 700ms 一次，最多等 25 秒：以前只查一次（1.2 秒），
         # 冷启动要好几秒，用户点完看不到任何变化，只能瞎等。
         self.root.after(400, lambda: self._wait_ready(port, time.time() + 25))
@@ -2493,26 +2875,34 @@ class MainWindow:
     def _wait_ready(self, port, deadline):
         """轮询到端口响应（或进程死掉 / 超时）为止，期间状态栏一直是「启动中」。"""
         if not self._starting:
-            return                      # 中途点了停止
+            self._busy_hide()           # 中途点了停止
+            return
         if health(port)[0]:
             self._starting = False
+            self._busy_hide()
             self._refresh_status()
             self._toast("服务端已就绪：http://127.0.0.1:%d/" % port)
             return
         pid = running_pid()
         if not (pid and _pid_alive(pid)):
             self._starting = False
+            self._busy_hide()
             self._refresh_status()
             self._toast("服务进程没起来，去「消息」页看日志")
             return
         if time.time() >= deadline:
             self._starting = False
+            self._busy_hide()
             self._refresh_status()
             self._toast("等了 25 秒端口还没响应，去「消息」页看日志")
             return
         self.root.after(700, lambda: self._wait_ready(port, deadline))
 
-    def stop_server(self):
+    def stop_server(self, user=True):
+        if user:
+            self._set_auto_start(False)   # 他主动停的，下次打开面板就不自动起了
+        self._busy_hide()
+        self._busy_show("正在停止服务…")
         self._starting = False           # 启动途中点停止：让 _wait_ready 收手
         pid = running_pid()
         killed = False
@@ -2532,6 +2922,13 @@ class MainWindow:
             pid_path().unlink()
         except Exception:
             pass
+        # 补一刀：onefile 的真正服务是解包出来的子进程，按端口找它
+        try:
+            port_now = int(self.v_port.get() or 8899)
+        except Exception:
+            port_now = 8899
+        if kill_port_owner(port_now):
+            killed = True
         if killed:
             self._toast("已停止")
         else:
@@ -2542,6 +2939,8 @@ class MainWindow:
                                     "可能是别的进程占着，用任务管理器结束 MarkSixBot.exe 即可。" % port)
             else:
                 self._toast("已经没在跑了")
+        # 提示窗留 1 秒让眼睛看见「正在停止」，然后自动收掉
+        self.root.after(900, self._busy_hide)
         self.root.after(1000, self._refresh_status)
 
     def do_backup(self):
@@ -2627,7 +3026,7 @@ class MainWindow:
                 "  · 记账流水 records.jsonl（撤销和 recalc 都靠它）\n"
                 "  · 未解析队列 unparsed.jsonl\n"
                 "  · 当前期号 current_issue.txt 和历史期归档 issues\\\n\n"
-                "清理前会自动把整份账打包到 backups\\ 留底，但清理本身不可撤销。\n"
+                "不留备份，清完即不可恢复。\n"
                 "会话清单、监听对象配置不受影响。\n\n"
                 "确定清空 %s 吗？" % (scope, scope))
         if not messagebox.askyesno("确认清空", body, parent=self.root):
@@ -2759,9 +3158,40 @@ def _enable_dpi_awareness():
             continue
 
 
+def _apply_app_icon(win):
+    """给主窗口和任务栏设同一枚图标。
+
+    源码运行取项目根 assets\\app.ico；打包后取 onefile 解包目录下的
+    assets\\app.ico（由 build_exe.ps1 的 --include-data-files 放进包里）。
+    找不到或设不上就直接跳过 —— 图标只影响观感，绝不能挡住启动。
+    """
+    import os
+    import sys
+    cands = []
+    try:
+        import __compiled__ as _c  # 只有 Nuitka 编译后才有这个模块
+        base = getattr(_c, "containing_dir", None) or os.path.dirname(sys.executable)
+        cands.append(os.path.join(base, "assets", "app.ico"))
+    except Exception:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands.append(os.path.join(here, "assets", "app.ico"))
+    cands.append(os.path.join(here, "..", "..", "assets", "app.ico"))
+    for p in cands:
+        try:
+            p = os.path.abspath(p)
+            if os.path.isfile(p):
+                win.iconbitmap(default=p)
+                return p
+        except Exception:
+            continue
+    return None
+
+
 def run():
     _enable_dpi_awareness()
     root = tk.Tk()
+    _apply_app_icon(root)
     try:
         # DPI 感知后 winfo_fpixels 拿到的是真实 DPI，按 1 point = dpi/72 像素
         # 重设缩放，字号才跟系统缩放一致（不设就还是 96 DPI 的老坐标）。
@@ -2780,7 +3210,7 @@ def run():
         st.configure("Treeview.Heading", font=("Microsoft YaHei UI", 11, "bold"))
     except Exception:
         pass
-    MainWindow(root)
+    win = MainWindow(root)
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     # 总览要并排摆两个号码盘，默认最大化
     try:
@@ -2793,6 +3223,15 @@ def run():
         root.after(2000, lambda: root.attributes("-topmost", False))
     except Exception:
         pass
+    # 打开面板就自动起服务（客户 2026-11-20 要求）。
+    # 只有他自己点过「停止服务」才会被记成 0，下次打开就不自动起了；
+    # 再点一次「启动服务」又记回 1。自动起失败只改状态栏，不弹框打扰。
+    try:
+        auto = int(read_cfg().get("auto_start_service", 1) or 0) != 0
+    except Exception:
+        auto = True
+    if auto:
+        root.after(700, lambda: win.start_server(auto=True))
     root.mainloop()
     return 0
 

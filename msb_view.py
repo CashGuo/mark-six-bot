@@ -309,7 +309,7 @@ def lian_len(text: str) -> int:
     return _CN_NUM.get(m.group(1)) or int(m.group(1))
 
 
-def zodiac_board(account: str = "", market: str = "MO") -> dict:
+def zodiac_board(account: str = "", market: str = "MO", items=None) -> dict:
     """总览用：12 生肖金额（平特与连肖合并一列）+ 组合注（二中二/三中三整注）。
 
     只读推算，不改账。不落号码盘的注现在只存了 text 和 amount，这里按原文还原
@@ -326,7 +326,7 @@ def zodiac_board(account: str = "", market: str = "MO") -> dict:
             for z in ZODIAC_ANIMALS]
     idx = {r["zodiac"]: r for r in rows}
 
-    items = others_items(account, market)
+    items = others_items(account, market) if items is None else items
     combo, unknown = [], []
     combo_groups: dict = {}
     tot = {"board": 0.0, "combo": 0.0, "unknown": 0.0}
@@ -684,9 +684,106 @@ def summary(account: str = "", market: str = "MO") -> dict:
         "risk": risks["HK"] if market == "HK" else risks["MO"],
         "grids": grids,
         "risks": risks,
+        # 生肖金额表也一起给：界面切历史期时要用同一份口径，别让界面自己去读账本
+        "zodiac_board": {
+            "MO": zodiac_board(account, "MO"),
+            "HK": zodiac_board(account, "HK"),
+        },
         "recent": recent_records(account),
         "unparsed": unp_rows,
         "unparsed_current": unp_cur,
+    }
+
+
+def _archived_data(accounts, issue: str) -> dict:
+    """把若干账号同一期的归档合并：{MO/HK: {"numbers": {...}, "others": {"total","items"}}}"""
+    out = {m: {"numbers": {}, "others": {"total": 0.0, "items": []}} for m in ("MO", "HK")}
+    for a in accounts:
+        d = read_json(state_dir() / a / "issues" / (issue + ".json"), None)
+        if not isinstance(d, dict):
+            continue
+        books = d.get("markets") or {}
+        for m in ("MO", "HK"):
+            b = books.get(m) or {}
+            for k, v in (b.get("numbers") or {}).items():
+                try:
+                    out[m]["numbers"][k] = round(
+                        float(out[m]["numbers"].get(k, 0) or 0) + float(v or 0), 2)
+                except Exception:
+                    continue
+            try:
+                out[m]["others"]["total"] = round(
+                    float(out[m]["others"]["total"]) + float(b.get("flat_total") or 0), 2)
+            except Exception:
+                pass
+            for x in (b.get("others") or []):
+                if isinstance(x, dict):
+                    out[m]["others"]["items"].append(x)
+    return out
+
+
+def issue_summary(account: str = "", issue: str = "", market: str = "MO") -> dict:
+    """看已归档的某一期，结构与 summary() 完全一致，界面换个期号就能直接重画。
+
+    只读 issues/<期号>.json，不碰当前账本。records / recent / unparsed 这类「本期流水」
+    对历史期没有意义，一律给空；合计视图把各账号同一期的归档合并起来。
+    """
+    if not issue:
+        return summary(account, market)
+    accs = [account] if account else all_accounts()
+    dd = _archived_data(accs, issue)
+    dm, dh = dd["MO"]["numbers"], dd["HK"]["numbers"]
+    if market == "HK":
+        data = dh
+    elif market == "ALL":
+        data = {k: round(float(dm.get(k, 0) or 0) + float(dh.get(k, 0) or 0), 2)
+                for k in set(dm) | set(dh)}
+    else:
+        data = dm
+    flat_mo = round(float(dd["MO"]["others"]["total"] or 0), 2)
+    flat_hk = round(float(dd["HK"]["others"]["total"] or 0), 2)
+    board_mo = round(sum(float(v or 0) for v in dm.values()), 2)
+    board_hk = round(sum(float(v or 0) for v in dh.values()), 2)
+    banks = {
+        "MO": {"board": board_mo, "flat": flat_mo, "total": round(board_mo + flat_mo, 2)},
+        "HK": {"board": board_hk, "flat": flat_hk, "total": round(board_hk + flat_hk, 2)},
+    }
+    banks["ALL"] = {k: round(banks["MO"][k] + banks["HK"][k], 2)
+                    for k in ("board", "flat", "total")}
+    flat = {"MO": flat_mo, "HK": flat_hk}.get(market, round(flat_mo + flat_hk, 2))
+    grids = {"MO": grid_from(dm), "HK": grid_from(dh)}
+    risks = {"MO": risk_from(dm, 49), "HK": risk_from(dh, 49)}
+    _, current, _ = zodiac_year()
+    return {
+        "account": account,
+        "accounts": all_accounts(),
+        "market": market,
+        "markets": banks,
+        "grand_total": banks["ALL"]["total"],
+        "flat_total": flat,
+        "numbers_with_bets": sum(1 for v in data.values() if v > 0),
+        "numbers_with_bets_all": len({k for k, v in dm.items() if v > 0}
+                                     | {k for k, v in dh.items() if v > 0}),
+        "records_today": 0,
+        "records_current": 0,
+        "unparsed_today": 0,
+        "issue": issue,
+        "issue_archived": len(issue_files(account)),
+        "zodiac": current,
+        "zodiac_year": zodiac_year()[0],
+        "grid": grids["HK"] if market == "HK" else grids["MO"],
+        "risk": risks["HK"] if market == "HK" else risks["MO"],
+        "grids": grids,
+        "risks": risks,
+        "zodiac_board": {
+            "MO": zodiac_board("", "MO", items=dd["MO"]["others"]["items"]),
+            "HK": zodiac_board("", "HK", items=dd["HK"]["others"]["items"]),
+        },
+        "recent": [],
+        "unparsed": [],
+        "unparsed_current": 0,
+        "flat_items": dd["HK" if market == "HK" else "MO"]["others"]["items"][-8:],
+        "archived_view": True,
     }
 
 

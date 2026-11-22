@@ -1,0 +1,8 @@
+# 统一换行，避免编辑器把整文件改成 CRLF 产生整文件 diff
+* text=auto eol=lf
+*.exe binary
+*.ico binary
+*.png binary
+*.docx binary
+*.zip binary
+

@@ -211,15 +211,30 @@ def detect_market(t: str) -> str:
 
 
 # 港澳标记词（长的排前面，正则按左到右优先，避免 "香港" 被拆成 "香"+"港"）
-_MARK_WORDS = ("新奥", "香港", "澳门", "奥门", "港", "澳", "香", "奥", "巷", "门")
+# 港澳标记词（长的排前面，正则按左到右优先，避免 "香港" 被拆成 "香"+"港"）
+# 「香港盘 / 香盘 / 港盘」这些带「盘」字的写法客户很爱用：以前只剥掉"香港"，
+# 剩下个"盘"字留在正文里，整条就判成解析失败（"牛马各20 香港盘"→"牛马各20 盘"）。
+# 复合词必须排在单字前面，否则先匹配到"香港"、剩下"盘"照样卡住。
+_MARK_WORDS = ("香港盘", "香港盤", "澳门盘", "澳門盘", "澳門盤", "奥门盘", "奥門盘",
+               "新奥盘", "新奧盘", "香盘", "香盤", "港盘", "港盤", "澳盘", "澳盤",
+               "奥盘", "奧盘",
+               "新奥", "香港", "澳门", "奥门", "港", "澳", "香", "奥", "巷", "门")
 _MARK_RE = re.compile("|".join(re.escape(w) for w in _MARK_WORDS))
 _HK_WORDS = {"香港", "港", "香", "巷"}
+
+
+def _word_market(w: str) -> str:
+    """一个标记词属于哪个盘：含 香/港/巷 就是香港，其余（澳门/奥门/新奥…）是澳门。"""
+    return "HK" if any(k in w for k in HK_MARKS) else "MO"
 
 
 def _strip_marks(t: str) -> str:
     """标记词只是分盘用的，不是下注内容 —— 留着会被当成认不出的碎片。"""
     for w in _MARK_WORDS:
         t = t.replace(w, "")
+    # 结尾的语气词（"牛马各20香港哦" 剥掉盘口后剩 "牛马各20哦"）：留着会被当成
+    # 认不出的碎片，整条判失败。只剥结尾，中间的"哦"不动。
+    t = re.sub(r"[哦啊呀吧呢嘛咯嘞喔噢]+$", "", t)
     return t
 
 
@@ -236,7 +251,7 @@ def split_markets(t: str) -> List[tuple]:
         body = t[pos:m.start()].strip(" ,，、。;；:：")
         if body:
             out.append((cur, body))
-        cur = "HK" if m.group(0) in _HK_WORDS else "MO"
+        cur = _word_market(m.group(0))
         pos = m.end()
     tail = t[pos:].strip(" ,，、。;；:：")
     if tail:
