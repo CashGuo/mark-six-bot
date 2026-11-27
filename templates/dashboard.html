@@ -175,8 +175,8 @@ td.who{white-space:nowrap;color:var(--blue);font-weight:700}
       <span class="chip">生肖年 <b id="zyear">—</b></span>
       <span class="chip">号码盘 <b id="desk">0</b></span>
       <span class="chip">平特 <b id="flat">0</b></span>
-      <span class="chip">本期已记账 <b id="krec">0</b></span>
-      <span class="chip" id="unpChip" title="点这里看是哪几条消息">本期未解析 <b id="kunp">0</b></span>
+      <span class="chip"><span id="capRec">本期已记账</span> <b id="krec">0</b></span>
+      <span class="chip" id="unpChip" title="点这里看是哪几条消息"><span id="capUnp">本期未解析</span> <b id="kunp">0</b></span>
       <!-- 开奖封盘：与桌面控制台顶栏末位那一格同位置、同文案 -->
       <span class="chip" id="closeInfo"></span>
       <span class="grow"></span>
@@ -335,7 +335,8 @@ function fmtLeft(s){
 function paintCutoff(){
   const el = document.getElementById('closeInfo');
   if (!el) return;
-  /* 文案与桌面控制台顶栏那一格完全一样：已封盘（21:30 开奖） / 21:30 截止（剩 3 小时 12 分） */
+  /* 文案与桌面控制台顶栏那一格完全一样：已封盘（21:30 开奖） / 21:30 截止（剩 3 小时 12 分）
+     看的是历史期就一律「已封盘」：那一期早开过奖了，写倒计时会让人以为还能下注。 */
   if (CUT.closed || CUT.left <= 0){
     el.className = 'chip closed';
     el.textContent = '已封盘（' + (CUT.draw || '') + ' 开奖）';
@@ -366,6 +367,11 @@ function renderTop(){
   document.getElementById('flat').textContent = fmt(d.flat_total);
   document.getElementById('krec').textContent = d.records_current || 0;
   document.getElementById('kunp').textContent = unparsedCount();
+  // 切到前一期时「本期」这个说法就不对了：顶栏的标签跟着期别改口，
+  // 数值也取归档期从流水数回来的笔数（后端已按 issue 统计）。
+  const histView = !!d.archived_view;
+  document.getElementById('capRec').textContent = histView ? '该期已记账' : '本期已记账';
+  document.getElementById('capUnp').textContent = histView ? '该期未解析' : '本期未解析';
 }
 
 /* 未解析数：与 GUI 一样从消息流水里数（result=未解析 且属于当前账期），

@@ -714,13 +714,16 @@ class MainWindow:
             w = tk.Frame(row, bg=CLR_CARD)
             if pack:
                 w.pack(side="left", padx=(0, 16))
-            tk.Label(w, text=label, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED).pack(side="left")
+            cap = tk.Label(w, text=label, font=FONT_S, bg=CLR_CARD, fg=CLR_MUTED)
+            cap.pack(side="left")
             lb = tk.Label(w, text="—", font=FONT_B, bg=CLR_CARD, fg="#111827")
             lb.pack(side="left", padx=(4, 0))
             if click is not None:
                 lb.configure(fg=CLR_BLUE, cursor="hand2")
                 lb.bind("<Button-1>", lambda _e: click())
             setattr(self, attr, lb)
+            # 标题也存一份：切到历史期时「本期已记账」要改口成「该期已记账」
+            setattr(self, attr + "_cap", cap)
 
         # 账期：本期 / 前一期 / 前二期 —— 下拉切着看最近三期的账面，默认本期
         self.issue_var = tk.StringVar()
@@ -2335,15 +2338,26 @@ class MainWindow:
             ((banks.get("ALL") or {}).get("board")) or 0))
         self.lb_flat.configure(text=fmt_money(s.get("flat_total") or 0))
         self.lb_krec.configure(text=str(s.get("records_current") or 0))
+        # 历史期不是"本期"：顶栏这两个标签跟着期别改口，不然切到前一期还写「本期已记账 0」
+        hist_view = bool(getattr(self, "_view_history", False))
+        for cap, cur_txt, old_txt in (
+                (getattr(self, "lb_krec_cap", None), "该期已记账", "本期已记账"),
+                (getattr(self, "lb_kunp_cap", None), "该期未解析", "本期未解析")):
+            if cap is not None:
+                try:
+                    cap.configure(text=cur_txt if hist_view else old_txt)
+                except Exception:
+                    pass
         # 封盘：不管在看哪一期，都告诉你「现在这期还收不收注」。
         # 后端过了开奖时刻就拒收（只回一句说明），顶栏以前不露这个状态，
         # 客户只能等注被拒了才知道已经封盘。口径同 main.draw_cutoff_state。
+        # 看的是历史期就直接「已封盘」：那一期早开过奖了，写倒计时会让人以为还能下注。
         try:
             cfg_now = getattr(self, "cfg", None) or read_cfg()
             cut = cut_state(live.get("issue"), (cfg_now or {}).get("draw_time"))
         except Exception:
             cut = cut_state(live.get("issue"), "21:30")
-        if cut["closed"]:
+        if hist_view or cut["closed"]:
             self.lb_cut.configure(text="已封盘（%s 开奖）" % cut["draw"],
                                   fg=CLR_RED)
         else:

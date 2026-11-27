@@ -3817,6 +3817,21 @@ def api_board():
     history = bool(view_issue and view_issue != cur_issue)
 
     cut = draw_cutoff_state()
+    # 历史期是已经结束的期：封盘状态不能沿用本期的倒计时，否则切到「前一期」
+    # 顶栏还写着「21:30 截止（剩 N 小时）」，看着像那一期还能下注。
+    if history:
+        try:
+            day = datetime.strptime(view_issue, "%Y-%m-%d")
+            close_at = datetime(day.year, day.month, day.day, DRAW_TIME_HH, DRAW_TIME_MM)
+        except Exception:
+            close_at = cut["close_at"]
+        closed_view, left_view = True, 0
+        close_text = close_at.strftime("%m-%d %H:%M")
+    else:
+        closed_view = bool(cut["closed"])
+        left_view = max(0, int((cut["close_at"] - cut["now"]).total_seconds()))
+        close_text = cut["close_at"].strftime("%m-%d %H:%M")
+
     rows = tail_messages(500)
     try:
         revd = reversed_msg_ids()
@@ -3862,9 +3877,9 @@ def api_board():
         "issue_options": _board_issue_options(acc),
         # 开奖时间封盘：过了点不再收注，次日 0 点自动进下一期
         "draw_time": cut["draw_time"],
-        "closed": cut["closed"],
-        "close_at": cut["close_at"].strftime("%m-%d %H:%M"),
-        "seconds_left": max(0, int((cut["close_at"] - cut["now"]).total_seconds())),
+        "closed": closed_view,
+        "close_at": close_text,
+        "seconds_left": left_view,
         "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     })
 

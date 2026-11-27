@@ -488,6 +488,46 @@ def _reversed_rec_ids(account: str = "") -> set:
     return ids
 
 
+def issue_bet_count(issue: str, account: str = "") -> int:
+    """某一期已记账的笔数，撤销掉的扣掉；历史期也能算。
+
+    账本（numbers_state）只存"每个号多少钱"，没有笔数，所以只能回流水里数。
+    网页和桌面控制台切到「前一期」时，顶栏那个「已记账」就是靠这个数出来的 ——
+    以前历史期一律返回 0，顶栏写「0 笔」、下面列着 5 行，自相矛盾。
+    """
+    if not issue:
+        return 0
+    accs = [account] if account else all_accounts()
+    revd = _reversed_rec_ids(account)
+    n = 0
+    for a in accs:
+        p = state_dir() / a / "records.jsonl"
+        if not p.exists():
+            continue
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        r = json.loads(ln)
+                    except Exception:
+                        continue
+                    if not isinstance(r, dict):
+                        continue
+                    if str(r.get("type") or "") == "reversal":
+                        continue
+                    if str(r.get("issue") or "") != issue:
+                        continue
+                    if str(r.get("rec_id") or r.get("msg_id") or "") in revd:
+                        continue
+                    n += 1
+        except Exception:
+            continue
+    return n
+
+
 def current_bet_count(account: str = "") -> int:
     """本期已记账的笔数，撤销掉的扣掉。
 
@@ -765,7 +805,8 @@ def issue_summary(account: str = "", issue: str = "", market: str = "MO") -> dic
         "numbers_with_bets_all": len({k for k, v in dm.items() if v > 0}
                                      | {k for k, v in dh.items() if v > 0}),
         "records_today": 0,
-        "records_current": 0,
+        # 历史期笔数从流水里按期数回来：顶栏「已记账 N」和下面列的明细才对得上
+        "records_current": issue_bet_count(issue, account),
         "unparsed_today": 0,
         "issue": issue,
         "issue_archived": len(issue_files(account)),
